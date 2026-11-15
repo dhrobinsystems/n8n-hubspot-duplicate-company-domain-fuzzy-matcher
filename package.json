@@ -1,0 +1,47 @@
+{
+  "name": "n8n-hubspot-duplicate-company-domain-fuzzy-matcher",
+  "version": "1.0.0",
+  "description": "Scheduled read-only audit that fuzzy-matches HubSpot company domains and legal names (legal suffixes, sub-domains, typos; Jaro-Winkler + Levenshtein) and delivers one deduplicated review queue to Slack or Notion. n8n workflow + zero-dependency Node.js CLI mirror.",
+  "main": "src/index.js",
+  "bin": {
+    "hubspot-dup-company-matcher": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "node src/index.js --dry-run",
+    "demo": "node src/index.js --input test/fixtures/companies.json",
+    "test": "node --test",
+    "build:workflow": "node scripts/build-workflow.js",
+    "check:workflow": "node scripts/build-workflow.js --check"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "n8n",
+    "hubspot",
+    "deduplication",
+    "fuzzy-matching",
+    "jaro-winkler",
+    "levenshtein",
+    "revops",
+    "crm-hygiene",
+    "notion",
+    "slack"
+  ],
+  "author": "DH Robin (dhRobin Systems)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dhrobinsystems/n8n-hubspot-duplicate-company-domain-fuzzy-matcher.git"
+  },
+  "files": [
+    "src/",
+    "workflows/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "DISCLAIMER.md",
+    ".env.example"
+  ]
+}
