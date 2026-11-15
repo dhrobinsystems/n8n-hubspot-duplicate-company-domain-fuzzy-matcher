@@ -1,0 +1,24 @@
+{
+  "results": [
+    { "id": "1001", "properties": { "hs_object_id": "1001", "name": "Acme Corp", "domain": "acme.example", "website": "https://www.acme.example", "createdate": "2019-03-04T10:00:00.000Z", "num_associated_deals": "5", "annualrevenue": "2500000" } },
+    { "id": "1002", "properties": { "hs_object_id": "1002", "name": "Acme Corporation", "domain": "", "website": "https://www.acme.example/about-us", "createdate": "2021-06-01T09:00:00.000Z", "num_associated_deals": "1", "annualrevenue": null } },
+    { "id": "1003", "properties": { "hs_object_id": "1003", "name": "ACME, Inc.", "domain": "eu.acme.example", "website": "", "createdate": "2022-01-15T12:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "1004", "properties": { "hs_object_id": "1004", "name": "Acmee Corp LLC", "domain": "", "website": "", "createdate": "2023-02-20T08:30:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "2001", "properties": { "hs_object_id": "2001", "name": "Globex Industries", "domain": "globex.example", "website": "http://globex.example", "createdate": "2018-11-11T11:11:00.000Z", "num_associated_deals": "3", "annualrevenue": "9000000" } },
+    { "id": "2002", "properties": { "hs_object_id": "2002", "name": "Globex Industires Ltd", "domain": "globex-industries.example", "website": "", "createdate": "2024-04-04T04:04:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "3001", "properties": { "hs_object_id": "3001", "name": "Initech LLC", "domain": "initech.test", "website": "", "createdate": "2020-05-05T05:05:00.000Z", "num_associated_deals": "2", "annualrevenue": "750000" } },
+    { "id": "3002", "properties": { "hs_object_id": "3002", "name": "Initech, Inc.", "domain": "", "website": "http://initech.test:8080/contact", "createdate": "2020-07-07T07:07:00.000Z", "num_associated_deals": "2", "annualrevenue": "800000" } },
+    { "id": "4001", "properties": { "hs_object_id": "4001", "name": "Brightwater Analytics", "domain": "brightwater-analytics.example", "website": "", "createdate": "2021-01-01T00:00:00.000Z", "num_associated_deals": "1", "annualrevenue": null } },
+    { "id": "4002", "properties": { "hs_object_id": "4002", "name": "Brightwater Logistics", "domain": "brightwater-logistics.example", "website": "", "createdate": "2021-02-02T00:00:00.000Z", "num_associated_deals": "1", "annualrevenue": null } },
+    { "id": "5001", "properties": { "hs_object_id": "5001", "name": "Café Lumière S.A.R.L.", "domain": "cafe-lumiere.example", "website": "", "createdate": "2022-09-09T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "5002", "properties": { "hs_object_id": "5002", "name": "Cafe Lumiere", "domain": "", "website": "www.cafelumiere.example", "createdate": "2023-09-09T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "6001", "properties": { "hs_object_id": "6001", "name": "Halverson & Co.", "domain": "halverson.example", "website": "", "createdate": "2017-01-01T00:00:00.000Z", "num_associated_deals": "4", "annualrevenue": null } },
+    { "id": "6002", "properties": { "hs_object_id": "6002", "name": "Halverson and Company", "domain": "halverson-uk.example", "website": "", "createdate": "2019-01-01T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "7001", "properties": { "hs_object_id": "7001", "name": "Pixel Bakery", "domain": "gmail.com", "website": "", "createdate": "2024-01-01T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "7002", "properties": { "hs_object_id": "7002", "name": "Quill Studio", "domain": "gmail.com", "website": "", "createdate": "2024-01-02T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "8001", "properties": { "hs_object_id": "8001", "name": "Northwind Maskin AB", "domain": "northwind-maskin.example", "website": "", "createdate": "2020-03-03T00:00:00.000Z", "num_associated_deals": "1", "annualrevenue": null } },
+    { "id": "8002", "properties": { "hs_object_id": "8002", "name": "Northwind Maskin", "domain": "", "website": "", "createdate": "2020-04-04T00:00:00.000Z", "num_associated_deals": "0", "annualrevenue": null } },
+    { "id": "9001", "properties": { "hs_object_id": "9001", "name": "Umbrella Holdings", "domain": "umbrella.example", "website": "", "createdate": "2016-06-06T00:00:00.000Z", "num_associated_deals": "2", "annualrevenue": null } },
+    { "id": "9002", "properties": { "hs_object_id": "9002", "name": "Umbrella Health", "domain": "umbrella-health.example", "website": "", "createdate": "2016-07-07T00:00:00.000Z", "num_associated_deals": "1", "annualrevenue": null } }
+  ]
+}
