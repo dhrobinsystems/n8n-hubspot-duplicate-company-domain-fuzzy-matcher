@@ -49,6 +49,8 @@ Zero runtime dependencies. Zero test dependencies. Node.js 18 or later.
 
 ## Architecture
 
+![Workflow Overview](assets/workflow-overview.png)
+
 ```
  ┌───────────────────┐   ┌────────────────┐
  │ Schedule Trigger  │   │ Manual Trigger │
