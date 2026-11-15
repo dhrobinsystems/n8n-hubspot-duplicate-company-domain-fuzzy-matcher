@@ -1,0 +1,849 @@
+{
+  "name": "HubSpot Duplicate Company Fuzzy Matcher (weekly audit)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## HubSpot duplicate company fuzzy matcher\nRead-only weekly audit. Finds likely duplicate companies (legal suffixes, sub-domains, typos) and sends one consolidated review queue to Slack and/or Notion.\n\n**Safe by default:** `DRY_RUN` and `SANDBOX_MODE` are true unless the env var is exactly `false`.\n\n**Env vars:** HUBSPOT_ACCESS_TOKEN, SLACK_WEBHOOK_URL, NOTION_API_KEY, NOTION_DATABASE_ID, DRY_RUN, SANDBOX_MODE, SIMILARITY_THRESHOLD, NOTIFY_TARGETS, MAX_COMPANIES, MAX_BLOCK_SIZE.\n\nRequires `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`. Code nodes are generated from `src/` — edit there and rebuild.",
+        "height": 300,
+        "width": 520
+      },
+      "id": "8c70c563-a764-4465-ab1b-e6f979b679b3",
+      "name": "Sticky: Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      },
+      "id": "c18d5ccf-06db-4199-a817-db7563b7e6bf",
+      "name": "Weekly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "41384dff-dcf3-4331-afba-2a7dd7c0e88f",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/safety.js (generated — edit the source file, not this node) =====\n/**\n * safety.js — configuration resolution, sandbox gate and secret masking.\n *\n * PURE MODULE: no require(), no I/O. scripts/build-workflow.js inlines this\n * file verbatim into the n8n Code nodes (\"Config & Safety Gate\",\n * \"Sandbox Verification\", \"Masked Error Logger\") so the CLI and the workflow\n * enforce exactly the same rules.\n */\n\nconst ALLOWED_ACCOUNT_TYPES = ['SANDBOX', 'DEVELOPER_TEST'];\nconst NOTIFY_TARGET_VALUES = ['slack', 'notion', 'none'];\nconst SECRET_ENV_KEYS = ['HUBSPOT_ACCESS_TOKEN', 'SLACK_WEBHOOK_URL', 'NOTION_API_KEY', 'NOTION_DATABASE_ID'];\nconst CONFIG_ENV_KEYS = SECRET_ENV_KEYS.concat([\n  'DRY_RUN',\n  'SANDBOX_MODE',\n  'SIMILARITY_THRESHOLD',\n  'NOTIFY_TARGETS',\n  'MAX_COMPANIES',\n  'MAX_BLOCK_SIZE',\n  'HUBSPOT_API_BASE',\n]);\n\n/**\n * Parse a boolean-ish env value. Anything that is not a recognised value\n * falls back to the default, so a typo such as DRY_RUN=flase stays SAFE.\n */\nfunction parseBool(value, defaultValue) {\n  if (value === undefined || value === null) return defaultValue;\n  const v = String(value).trim().toLowerCase();\n  if (v === '') return defaultValue;\n  if (['true', '1', 'yes', 'on'].includes(v)) return true;\n  if (['false', '0', 'no', 'off'].includes(v)) return false;\n  return defaultValue;\n}\n\nfunction parseNumber(value, defaultValue) {\n  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;\n  const n = Number(String(value).trim());\n  return Number.isFinite(n) ? n : NaN;\n}\n\n/** Placeholder values copied from .env.example are treated as \"not set\". */\nfunction cleanSecret(value) {\n  if (value === undefined || value === null) return '';\n  const s = String(value).trim();\n  if (/^YOUR_[A-Z0-9_]+$/.test(s)) return '';\n  return s;\n}\n\n/**\n * Resolve the full runtime configuration from an env-like object.\n * Returns { settings, secrets, errors }. `settings` never contains secret\n * values, so it is safe to log or pass between n8n nodes.\n */\nfunction resolveConfig(env, options) {\n  const opts = options || {};\n  const e = env || {};\n  const secrets = {\n    hubspotToken: cleanSecret(e.HUBSPOT_ACCESS_TOKEN),\n    slackWebhookUrl: cleanSecret(e.SLACK_WEBHOOK_URL),\n    notionApiKey: cleanSecret(e.NOTION_API_KEY),\n    notionDatabaseId: cleanSecret(e.NOTION_DATABASE_ID),\n  };\n\n  const rawTargets = e.NOTIFY_TARGETS === undefined || e.NOTIFY_TARGETS === null || String(e.NOTIFY_TARGETS).trim() === ''\n    ? 'slack'\n    : String(e.NOTIFY_TARGETS);\n  const targets = rawTargets.toLowerCase().split(/[\\s,]+/).filter(Boolean);\n\n  const settings = {\n    dryRun: parseBool(e.DRY_RUN, true),\n    sandboxMode: parseBool(e.SANDBOX_MODE, true),\n    similarityThreshold: parseNumber(e.SIMILARITY_THRESHOLD, 0.85),\n    notifySlack: targets.includes('slack'),\n    notifyNotion: targets.includes('notion'),\n    notifyTargets: targets,\n    maxCompanies: parseNumber(e.MAX_COMPANIES, 50000),\n    maxBlockSize: parseNumber(e.MAX_BLOCK_SIZE, 2000),\n    hubspotApiBase: String(e.HUBSPOT_API_BASE || 'https://api.hubapi.com').trim().replace(/\\/+$/, ''),\n    secretsPresent: {\n      hubspotToken: secrets.hubspotToken !== '',\n      slackWebhookUrl: secrets.slackWebhookUrl !== '',\n      notionApiKey: secrets.notionApiKey !== '',\n      notionDatabaseId: secrets.notionDatabaseId !== '',\n    },\n  };\n\n  if (opts.forceDryRun) settings.dryRun = true;\n  if (opts.thresholdOverride !== undefined && opts.thresholdOverride !== null) {\n    settings.similarityThreshold = parseNumber(opts.thresholdOverride, NaN);\n  }\n  if (opts.targetsOverride) {\n    const t = String(opts.targetsOverride).toLowerCase().split(/[\\s,]+/).filter(Boolean);\n    settings.notifyTargets = t;\n    settings.notifySlack = t.includes('slack');\n    settings.notifyNotion = t.includes('notion');\n  }\n\n  const errors = [];\n  const t = settings.similarityThreshold;\n  if (!(t > 0 && t <= 1)) errors.push('SIMILARITY_THRESHOLD must be a number greater than 0 and at most 1');\n  const unknown = settings.notifyTargets.filter((x) => !NOTIFY_TARGET_VALUES.includes(x));\n  if (unknown.length) errors.push('NOTIFY_TARGETS contains unknown value(s): ' + unknown.join(', ') + ' (allowed: slack, notion, none)');\n  if (!(Number.isInteger(settings.maxCompanies) && settings.maxCompanies > 0)) errors.push('MAX_COMPANIES must be a positive integer');\n  if (!(Number.isInteger(settings.maxBlockSize) && settings.maxBlockSize >= 2)) errors.push('MAX_BLOCK_SIZE must be an integer of at least 2');\n  if (!/^https:\\/\\//i.test(settings.hubspotApiBase)) errors.push('HUBSPOT_API_BASE must use https://');\n\n  if (!opts.offline && !secrets.hubspotToken) {\n    errors.push('HUBSPOT_ACCESS_TOKEN is not set (placeholder values count as unset)');\n  }\n  if (!settings.dryRun && settings.notifySlack) {\n    if (!secrets.slackWebhookUrl) errors.push('SLACK_WEBHOOK_URL is required when DRY_RUN=false and NOTIFY_TARGETS includes slack');\n    else if (!/^https:\\/\\//i.test(secrets.slackWebhookUrl)) errors.push('SLACK_WEBHOOK_URL must use https://');\n  }\n  if (!settings.dryRun && settings.notifyNotion) {\n    if (!secrets.notionApiKey) errors.push('NOTION_API_KEY is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n    if (!secrets.notionDatabaseId) errors.push('NOTION_DATABASE_ID is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n  }\n\n  return { settings, secrets, errors };\n}\n\n/**\n * Sandbox gate. When sandboxMode is on, the connected HubSpot portal must\n * report accountType SANDBOX or DEVELOPER_TEST (GET /account-info/v3/details).\n * Throws otherwise, which stops both the CLI and the n8n workflow.\n */\nfunction assertSandbox(accountInfo, sandboxMode) {\n  const accountType = String((accountInfo && accountInfo.accountType) || '').toUpperCase();\n  if (!sandboxMode) {\n    return { ok: true, enforced: false, accountType: accountType || 'UNKNOWN' };\n  }\n  if (ALLOWED_ACCOUNT_TYPES.includes(accountType)) {\n    return { ok: true, enforced: true, accountType };\n  }\n  throw new Error(\n    'Sandbox gate blocked this run: SANDBOX_MODE=true but the connected HubSpot portal reports accountType \"' +\n      (accountType || 'UNKNOWN') +\n      '\". Allowed: ' + ALLOWED_ACCOUNT_TYPES.join(', ') +\n      '. Point the token at a sandbox or developer test account, or set SANDBOX_MODE=false deliberately.'\n  );\n}\n\nconst SECRET_PATTERNS = [\n  [/Bearer\\s+[A-Za-z0-9._~+\\/=-]+/gi, 'Bearer ***'],\n  [/\\bpat-[a-z0-9]{2,4}-[A-Za-z0-9-]{8,}/gi, 'pat-***'],\n  [/https:\\/\\/hooks\\.slack\\.com\\/[^\\s\"'<>]+/gi, 'https://hooks.slack.com/***'],\n  [/\\b(?:secret|ntn)_[A-Za-z0-9]{16,}/g, '***notion-key***'],\n  [/\\b[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\\b/gi, '***id***'],\n  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g, '***@***'],\n];\n\n/** Mask known secret values and secret-shaped strings (tokens, webhooks, emails). */\nfunction maskSecrets(text, secretValues) {\n  let s = text === undefined || text === null ? '' : String(text);\n  const values = (secretValues || [])\n    .filter((v) => typeof v === 'string' && v.length >= 6)\n    .sort((a, b) => b.length - a.length);\n  for (const v of values) s = s.split(v).join('***');\n  for (const [re, replacement] of SECRET_PATTERNS) s = s.replace(re, replacement);\n  return s;\n}\n\n/** Turn any error-like value into a small, masked, log-safe object. */\nfunction maskError(errLike, secretValues) {\n  let message;\n  let status = null;\n  let name = 'Error';\n  if (errLike === undefined || errLike === null) message = 'Unknown error';\n  else if (typeof errLike === 'string') message = errLike;\n  else {\n    name = errLike.name || name;\n    status = errLike.httpCode || errLike.status || errLike.statusCode || null;\n    message = errLike.message || errLike.description || '';\n    if (!message) {\n      try { message = JSON.stringify(errLike); } catch (_) { message = String(errLike); }\n    }\n  }\n  const masked = maskSecrets(message, secretValues);\n  return {\n    name: String(name),\n    status: status === null ? null : String(status),\n    message: masked.length > 1000 ? masked.slice(0, 999) + '…' : masked,\n  };\n}\n\n// ===== n8n glue =====\nconst env = {};\nfor (const key of CONFIG_ENV_KEYS) {\n  let value;\n  try {\n    value = $env[key];\n  } catch (e) {\n    throw new Error('This workflow reads its configuration from environment variables. Set N8N_BLOCK_ENV_ACCESS_IN_NODE=false on the n8n instance (see README).');\n  }\n  if (value !== undefined && value !== null) env[key] = String(value);\n}\nconst { settings, errors } = resolveConfig(env);\nif (errors.length) throw new Error('Configuration invalid: ' + errors.join('; '));\n// Secrets are never placed in item data: HTTP nodes read them from $env directly.\nreturn [{ json: { config: settings, startedAt: new Date().toISOString() } }];\n"
+      },
+      "id": "860f4e60-c832-4eba-a970-ffbe46743cb0",
+      "name": "Config & Safety Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.config.hubspotApiBase }}/account-info/v3/details",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "e5b7b5a3-991f-49ed-a625-2371856b6ed3",
+      "name": "HubSpot: Verify Portal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/safety.js (generated — edit the source file, not this node) =====\n/**\n * safety.js — configuration resolution, sandbox gate and secret masking.\n *\n * PURE MODULE: no require(), no I/O. scripts/build-workflow.js inlines this\n * file verbatim into the n8n Code nodes (\"Config & Safety Gate\",\n * \"Sandbox Verification\", \"Masked Error Logger\") so the CLI and the workflow\n * enforce exactly the same rules.\n */\n\nconst ALLOWED_ACCOUNT_TYPES = ['SANDBOX', 'DEVELOPER_TEST'];\nconst NOTIFY_TARGET_VALUES = ['slack', 'notion', 'none'];\nconst SECRET_ENV_KEYS = ['HUBSPOT_ACCESS_TOKEN', 'SLACK_WEBHOOK_URL', 'NOTION_API_KEY', 'NOTION_DATABASE_ID'];\nconst CONFIG_ENV_KEYS = SECRET_ENV_KEYS.concat([\n  'DRY_RUN',\n  'SANDBOX_MODE',\n  'SIMILARITY_THRESHOLD',\n  'NOTIFY_TARGETS',\n  'MAX_COMPANIES',\n  'MAX_BLOCK_SIZE',\n  'HUBSPOT_API_BASE',\n]);\n\n/**\n * Parse a boolean-ish env value. Anything that is not a recognised value\n * falls back to the default, so a typo such as DRY_RUN=flase stays SAFE.\n */\nfunction parseBool(value, defaultValue) {\n  if (value === undefined || value === null) return defaultValue;\n  const v = String(value).trim().toLowerCase();\n  if (v === '') return defaultValue;\n  if (['true', '1', 'yes', 'on'].includes(v)) return true;\n  if (['false', '0', 'no', 'off'].includes(v)) return false;\n  return defaultValue;\n}\n\nfunction parseNumber(value, defaultValue) {\n  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;\n  const n = Number(String(value).trim());\n  return Number.isFinite(n) ? n : NaN;\n}\n\n/** Placeholder values copied from .env.example are treated as \"not set\". */\nfunction cleanSecret(value) {\n  if (value === undefined || value === null) return '';\n  const s = String(value).trim();\n  if (/^YOUR_[A-Z0-9_]+$/.test(s)) return '';\n  return s;\n}\n\n/**\n * Resolve the full runtime configuration from an env-like object.\n * Returns { settings, secrets, errors }. `settings` never contains secret\n * values, so it is safe to log or pass between n8n nodes.\n */\nfunction resolveConfig(env, options) {\n  const opts = options || {};\n  const e = env || {};\n  const secrets = {\n    hubspotToken: cleanSecret(e.HUBSPOT_ACCESS_TOKEN),\n    slackWebhookUrl: cleanSecret(e.SLACK_WEBHOOK_URL),\n    notionApiKey: cleanSecret(e.NOTION_API_KEY),\n    notionDatabaseId: cleanSecret(e.NOTION_DATABASE_ID),\n  };\n\n  const rawTargets = e.NOTIFY_TARGETS === undefined || e.NOTIFY_TARGETS === null || String(e.NOTIFY_TARGETS).trim() === ''\n    ? 'slack'\n    : String(e.NOTIFY_TARGETS);\n  const targets = rawTargets.toLowerCase().split(/[\\s,]+/).filter(Boolean);\n\n  const settings = {\n    dryRun: parseBool(e.DRY_RUN, true),\n    sandboxMode: parseBool(e.SANDBOX_MODE, true),\n    similarityThreshold: parseNumber(e.SIMILARITY_THRESHOLD, 0.85),\n    notifySlack: targets.includes('slack'),\n    notifyNotion: targets.includes('notion'),\n    notifyTargets: targets,\n    maxCompanies: parseNumber(e.MAX_COMPANIES, 50000),\n    maxBlockSize: parseNumber(e.MAX_BLOCK_SIZE, 2000),\n    hubspotApiBase: String(e.HUBSPOT_API_BASE || 'https://api.hubapi.com').trim().replace(/\\/+$/, ''),\n    secretsPresent: {\n      hubspotToken: secrets.hubspotToken !== '',\n      slackWebhookUrl: secrets.slackWebhookUrl !== '',\n      notionApiKey: secrets.notionApiKey !== '',\n      notionDatabaseId: secrets.notionDatabaseId !== '',\n    },\n  };\n\n  if (opts.forceDryRun) settings.dryRun = true;\n  if (opts.thresholdOverride !== undefined && opts.thresholdOverride !== null) {\n    settings.similarityThreshold = parseNumber(opts.thresholdOverride, NaN);\n  }\n  if (opts.targetsOverride) {\n    const t = String(opts.targetsOverride).toLowerCase().split(/[\\s,]+/).filter(Boolean);\n    settings.notifyTargets = t;\n    settings.notifySlack = t.includes('slack');\n    settings.notifyNotion = t.includes('notion');\n  }\n\n  const errors = [];\n  const t = settings.similarityThreshold;\n  if (!(t > 0 && t <= 1)) errors.push('SIMILARITY_THRESHOLD must be a number greater than 0 and at most 1');\n  const unknown = settings.notifyTargets.filter((x) => !NOTIFY_TARGET_VALUES.includes(x));\n  if (unknown.length) errors.push('NOTIFY_TARGETS contains unknown value(s): ' + unknown.join(', ') + ' (allowed: slack, notion, none)');\n  if (!(Number.isInteger(settings.maxCompanies) && settings.maxCompanies > 0)) errors.push('MAX_COMPANIES must be a positive integer');\n  if (!(Number.isInteger(settings.maxBlockSize) && settings.maxBlockSize >= 2)) errors.push('MAX_BLOCK_SIZE must be an integer of at least 2');\n  if (!/^https:\\/\\//i.test(settings.hubspotApiBase)) errors.push('HUBSPOT_API_BASE must use https://');\n\n  if (!opts.offline && !secrets.hubspotToken) {\n    errors.push('HUBSPOT_ACCESS_TOKEN is not set (placeholder values count as unset)');\n  }\n  if (!settings.dryRun && settings.notifySlack) {\n    if (!secrets.slackWebhookUrl) errors.push('SLACK_WEBHOOK_URL is required when DRY_RUN=false and NOTIFY_TARGETS includes slack');\n    else if (!/^https:\\/\\//i.test(secrets.slackWebhookUrl)) errors.push('SLACK_WEBHOOK_URL must use https://');\n  }\n  if (!settings.dryRun && settings.notifyNotion) {\n    if (!secrets.notionApiKey) errors.push('NOTION_API_KEY is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n    if (!secrets.notionDatabaseId) errors.push('NOTION_DATABASE_ID is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n  }\n\n  return { settings, secrets, errors };\n}\n\n/**\n * Sandbox gate. When sandboxMode is on, the connected HubSpot portal must\n * report accountType SANDBOX or DEVELOPER_TEST (GET /account-info/v3/details).\n * Throws otherwise, which stops both the CLI and the n8n workflow.\n */\nfunction assertSandbox(accountInfo, sandboxMode) {\n  const accountType = String((accountInfo && accountInfo.accountType) || '').toUpperCase();\n  if (!sandboxMode) {\n    return { ok: true, enforced: false, accountType: accountType || 'UNKNOWN' };\n  }\n  if (ALLOWED_ACCOUNT_TYPES.includes(accountType)) {\n    return { ok: true, enforced: true, accountType };\n  }\n  throw new Error(\n    'Sandbox gate blocked this run: SANDBOX_MODE=true but the connected HubSpot portal reports accountType \"' +\n      (accountType || 'UNKNOWN') +\n      '\". Allowed: ' + ALLOWED_ACCOUNT_TYPES.join(', ') +\n      '. Point the token at a sandbox or developer test account, or set SANDBOX_MODE=false deliberately.'\n  );\n}\n\nconst SECRET_PATTERNS = [\n  [/Bearer\\s+[A-Za-z0-9._~+\\/=-]+/gi, 'Bearer ***'],\n  [/\\bpat-[a-z0-9]{2,4}-[A-Za-z0-9-]{8,}/gi, 'pat-***'],\n  [/https:\\/\\/hooks\\.slack\\.com\\/[^\\s\"'<>]+/gi, 'https://hooks.slack.com/***'],\n  [/\\b(?:secret|ntn)_[A-Za-z0-9]{16,}/g, '***notion-key***'],\n  [/\\b[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\\b/gi, '***id***'],\n  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g, '***@***'],\n];\n\n/** Mask known secret values and secret-shaped strings (tokens, webhooks, emails). */\nfunction maskSecrets(text, secretValues) {\n  let s = text === undefined || text === null ? '' : String(text);\n  const values = (secretValues || [])\n    .filter((v) => typeof v === 'string' && v.length >= 6)\n    .sort((a, b) => b.length - a.length);\n  for (const v of values) s = s.split(v).join('***');\n  for (const [re, replacement] of SECRET_PATTERNS) s = s.replace(re, replacement);\n  return s;\n}\n\n/** Turn any error-like value into a small, masked, log-safe object. */\nfunction maskError(errLike, secretValues) {\n  let message;\n  let status = null;\n  let name = 'Error';\n  if (errLike === undefined || errLike === null) message = 'Unknown error';\n  else if (typeof errLike === 'string') message = errLike;\n  else {\n    name = errLike.name || name;\n    status = errLike.httpCode || errLike.status || errLike.statusCode || null;\n    message = errLike.message || errLike.description || '';\n    if (!message) {\n      try { message = JSON.stringify(errLike); } catch (_) { message = String(errLike); }\n    }\n  }\n  const masked = maskSecrets(message, secretValues);\n  return {\n    name: String(name),\n    status: status === null ? null : String(status),\n    message: masked.length > 1000 ? masked.slice(0, 999) + '…' : masked,\n  };\n}\n\n// ===== n8n glue =====\nconst config = $('Config & Safety Gate').first().json.config;\nconst info = $input.first().json || {};\nconst gate = assertSandbox(info, config.sandboxMode);\nreturn [{\n  json: {\n    config,\n    portal: {\n      portalId: info.portalId === undefined || info.portalId === null ? null : String(info.portalId),\n      accountType: info.accountType || null,\n      uiDomain: info.uiDomain || null,\n    },\n    sandboxGate: gate,\n  },\n}];\n"
+      },
+      "id": "d8f45e67-8d02-4625-aae4-9ac98e73dd97",
+      "name": "Sandbox Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.config.hubspotApiBase }}/crm/v3/objects/companies",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "archived",
+              "value": "false"
+            },
+            {
+              "name": "properties",
+              "value": "name,domain,website,hs_object_id,createdate,num_associated_deals,annualrevenue"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.HUBSPOT_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging?.next?.after }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.paging?.next?.after }}",
+              "limitPagesFetched": true,
+              "maxRequests": 500,
+              "requestInterval": 120
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "1432a7b1-55c7-4d67-a77b-7a83a545f5c1",
+      "name": "HubSpot: Fetch Companies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/matcher.js (generated — edit the source file, not this node) =====\n/**\n * matcher.js — domain/legal-name normalisation, Jaro-Winkler + Levenshtein\n * similarity, blocking, scoring and clustering of HubSpot companies.\n *\n * PURE MODULE: no require(), no I/O, deterministic output for a given input.\n * scripts/build-workflow.js inlines this file verbatim into the n8n Code node\n * \"Normalize & Fuzzy Match\", and test/workflow.test.js proves the workflow\n * and the CLI produce identical results.\n */\n\n// Legal-entity designators stripped from the END of a company name.\nconst LEGAL_SUFFIXES = new Set([\n  'inc', 'incorporated', 'llc', 'lc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company',\n  'plc', 'llp', 'lp', 'pllc', 'pc', 'gmbh', 'mbh', 'ag', 'kg', 'gmbhco', 'ug', 'ev', 'se',\n  'sa', 'sas', 'sarl', 'srl', 'spa', 'sl', 'bv', 'nv', 'oy', 'oyj', 'ab', 'as', 'asa', 'aps',\n  'pty', 'pte', 'pvt', 'kk', 'kft', 'sro', 'ou', 'sp', 'z', 'oo', 'zoo', 'cv', 'de', 'sapi',\n]);\n\n// Two-label public suffixes where the registrable root needs three labels.\nconst MULTI_PART_TLDS = new Set([\n  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'ltd.uk', 'plc.uk', 'me.uk',\n  'com.au', 'net.au', 'org.au', 'co.nz', 'org.nz', 'co.za', 'co.jp', 'or.jp', 'ne.jp',\n  'co.kr', 'or.kr', 'com.br', 'com.mx', 'com.ar', 'com.co', 'com.sg', 'com.my', 'com.hk',\n  'com.cn', 'com.tw', 'com.tr', 'co.in', 'firm.in', 'net.in', 'co.il', 'co.id', 'co.th',\n  'com.ph', 'com.vn', 'com.pk', 'com.bd', 'com.eg', 'com.sa', 'com.ng', 'co.ke',\n]);\n\n// Hosting platforms where the sub-domain identifies the company.\nconst PLATFORM_DOMAINS = new Set([\n  'github.io', 'myshopify.com', 'wixsite.com', 'squarespace.com', 'wordpress.com', 'blogspot.com',\n  'webflow.io', 'netlify.app', 'vercel.app', 'herokuapp.com', 'carrd.co', 'godaddysites.com',\n]);\n\n// Shared / free domains that say nothing about company identity.\nconst SHARED_DOMAINS = new Set([\n  'gmail.com', 'googlemail.com', 'google.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com',\n  'msn.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.de',\n  'yandex.com', 'mail.com', 'zoho.com', 'linkedin.com', 'facebook.com', 'instagram.com',\n  'twitter.com', 'x.com', 'youtube.com', 'bit.ly', 'linktr.ee',\n]);\n\nconst DEFAULT_MATCH_OPTIONS = {\n  threshold: 0.85,\n  maxBlockSize: 2000,\n  maxCompanies: Infinity,\n  minNameLength: 4,          // shorter normalised names must match exactly\n  minDomainLabelLength: 3,   // shorter domain labels must match exactly\n  nameWeight: 0.65,          // combined = nameWeight*name + domainWeight*domain\n  domainWeight: 0.35,\n  jaroWinklerWeight: 0.5,    // blended string score = 0.5*JW + 0.5*Levenshtein ratio\n  levenshteinWeight: 0.5,\n  exactNameFloor: 0.9,       // identical normalised names score at least this\n  domainPrefixScore: 0.9,    // one domain label starts with the other (acme / acme-corp)\n  extraSharedDomains: [],\n};\n\n// ---------------------------------------------------------------------------\n// Normalisation\n// ---------------------------------------------------------------------------\n\n/**\n * Normalise a domain or website value.\n *   \"https://www.EU.Acme.example:8443/about?x=1\" -> { host: \"eu.acme.example\", root: \"acme.example\", label: \"acme\" }\n * Returns null when nothing usable remains.\n */\nfunction normalizeDomain(input, extraShared) {\n  if (input === undefined || input === null) return null;\n  let s = String(input).trim().toLowerCase();\n  if (!s) return null;\n  s = s.replace(/^[a-z][a-z0-9+.-]*:\\/\\//, '').replace(/^\\/\\//, '');\n  s = s.replace(/^[^@\\/?#]*@/, '');          // userinfo or an email address\n  s = s.split(/[\\/?#\\\\\\s]/)[0];               // path, query, fragment\n  s = s.replace(/:\\d*$/, '').replace(/\\.+$/, '');\n  s = s.replace(/^www\\d*\\./, '');\n  if (!s || s.indexOf('.') === -1 || !/^[\\p{L}\\p{N}.-]+$/u.test(s)) return null;\n  const labels = s.split('.').filter(Boolean);\n  if (labels.length < 2) return null;\n  const last2 = labels.slice(-2).join('.');\n  let rootLen = 2;\n  if (labels.length >= 3 && (MULTI_PART_TLDS.has(last2) || PLATFORM_DOMAINS.has(last2))) rootLen = 3;\n  const host = labels.join('.');\n  const root = labels.slice(-rootLen).join('.');\n  const label = labels[labels.length - rootLen];\n  const extra = extraShared || [];\n  const shared = SHARED_DOMAINS.has(root) || SHARED_DOMAINS.has(host) || PLATFORM_DOMAINS.has(root) ||\n    extra.indexOf(root) !== -1 || extra.indexOf(host) !== -1;\n  return { host, root, label, shared };\n}\n\n/**\n * Normalise a legal company name.\n *   \"The ACME Corp., Inc.\"  -> \"acme\"\n *   \"Café Lumière S.A.R.L.\" -> \"cafe lumiere\"\n *   \"Halverson & Co.\"       -> \"halverson\"\n */\nfunction normalizeName(input) {\n  if (input === undefined || input === null) return '';\n  let s = String(input).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();\n  s = s.replace(/[’'`´]/g, '');\n  s = s.replace(/[&+]/g, ' and ');\n  s = s.replace(/\\b(?:[a-z]\\.){2,}/g, (m) => m.replace(/\\./g, '') + ' '); // S.A.R.L. -> sarl\n  s = s.replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();\n  const tokens = s.split(' ').filter(Boolean);\n  if (tokens.length > 1 && tokens[0] === 'the') tokens.shift();\n  while (tokens.length > 1) {\n    const last = tokens[tokens.length - 1];\n    if (LEGAL_SUFFIXES.has(last) || last === 'and') tokens.pop();\n    else break;\n  }\n  return tokens.join(' ');\n}\n\n// ---------------------------------------------------------------------------\n// String similarity\n// ---------------------------------------------------------------------------\n\nfunction jaroWinkler(a, b, prefixScale) {\n  const p = prefixScale === undefined ? 0.1 : prefixScale;\n  if (a === b) return 1;\n  const la = a.length;\n  const lb = b.length;\n  if (!la || !lb) return 0;\n  const range = Math.max(0, Math.floor(Math.max(la, lb) / 2) - 1);\n  const aMatch = new Array(la).fill(false);\n  const bMatch = new Array(lb).fill(false);\n  let matches = 0;\n  for (let i = 0; i < la; i++) {\n    const start = Math.max(0, i - range);\n    const end = Math.min(i + range + 1, lb);\n    for (let j = start; j < end; j++) {\n      if (!bMatch[j] && a[i] === b[j]) {\n        aMatch[i] = true;\n        bMatch[j] = true;\n        matches++;\n        break;\n      }\n    }\n  }\n  if (!matches) return 0;\n  let k = 0;\n  let transpositions = 0;\n  for (let i = 0; i < la; i++) {\n    if (!aMatch[i]) continue;\n    while (!bMatch[k]) k++;\n    if (a[i] !== b[k]) transpositions++;\n    k++;\n  }\n  const t = transpositions / 2;\n  const jaro = (matches / la + matches / lb + (matches - t) / matches) / 3;\n  let prefix = 0;\n  for (let i = 0; i < Math.min(4, la, lb); i++) {\n    if (a[i] === b[i]) prefix++;\n    else break;\n  }\n  return jaro + prefix * p * (1 - jaro);\n}\n\nfunction levenshtein(a, b) {\n  if (a === b) return 0;\n  if (!a.length) return b.length;\n  if (!b.length) return a.length;\n  let prev = new Array(b.length + 1);\n  let curr = new Array(b.length + 1);\n  for (let j = 0; j <= b.length; j++) prev[j] = j;\n  for (let i = 1; i <= a.length; i++) {\n    curr[0] = i;\n    for (let j = 1; j <= b.length; j++) {\n      const cost = a[i - 1] === b[j - 1] ? 0 : 1;\n      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);\n    }\n    const tmp = prev; prev = curr; curr = tmp;\n  }\n  return prev[b.length];\n}\n\nfunction levenshteinRatio(a, b) {\n  const max = Math.max(a.length, b.length);\n  if (!max) return 1;\n  return 1 - levenshtein(a, b) / max;\n}\n\n/** Blended score: JW rewards shared prefixes and typos, Levenshtein penalises different endings. */\nfunction blendedSimilarity(a, b, opts) {\n  const o = opts || DEFAULT_MATCH_OPTIONS;\n  const jw = jaroWinkler(a, b);\n  const lev = levenshteinRatio(a, b);\n  return { jaroWinkler: jw, levenshtein: lev, score: o.jaroWinklerWeight * jw + o.levenshteinWeight * lev };\n}\n\nfunction round4(n) {\n  return Math.round(n * 10000) / 10000;\n}\n\n// ---------------------------------------------------------------------------\n// Records\n// ---------------------------------------------------------------------------\n\nfunction toNumber(v) {\n  if (v === undefined || v === null || v === '') return null;\n  const n = Number(v);\n  return Number.isFinite(n) ? n : null;\n}\n\n/** Convert a HubSpot CRM v3 company object (or a flat object) into a match record. */\nfunction toRecord(raw, opts) {\n  const o = opts || DEFAULT_MATCH_OPTIONS;\n  const src = raw || {};\n  const p = src.properties || src;\n  const id = String(src.id !== undefined && src.id !== null ? src.id : (p.hs_object_id !== undefined && p.hs_object_id !== null ? p.hs_object_id : ''));\n  const name = p.name === undefined || p.name === null ? '' : String(p.name).trim();\n  const normName = normalizeName(name);\n  const domainInfo = normalizeDomain(p.domain, o.extraSharedDomains) || normalizeDomain(p.website, o.extraSharedDomains);\n  return {\n    id,\n    name,\n    domain: p.domain ? String(p.domain) : '',\n    website: p.website ? String(p.website) : '',\n    createdate: p.createdate || null,\n    numAssociatedDeals: toNumber(p.num_associated_deals),\n    annualRevenue: toNumber(p.annualrevenue),\n    normName,\n    compactName: normName.replace(/ /g, ''),\n    sortedName: normName.split(' ').sort().join(' '),\n    domainInfo,\n  };\n}\n\nfunction compareIds(a, b) {\n  const na = /^\\d+$/.test(a);\n  const nb = /^\\d+$/.test(b);\n  if (na && nb && a.length !== b.length) return a.length - b.length;\n  return a < b ? -1 : a > b ? 1 : 0;\n}\n\n// ---------------------------------------------------------------------------\n// Pair scoring\n// ---------------------------------------------------------------------------\n\nfunction compareRecords(a, b, options) {\n  const o = Object.assign({}, DEFAULT_MATCH_OPTIONS, options || {});\n  const reasons = [];\n\n  let name = null;\n  let exactName = false;\n  if (a.normName && b.normName) {\n    if (a.normName === b.normName || a.compactName === b.compactName) {\n      exactName = true;\n      name = { jaroWinkler: 1, levenshtein: 1, score: 1 };\n      reasons.push('exact-normalized-name');\n    } else if (Math.min(a.compactName.length, b.compactName.length) < o.minNameLength) {\n      name = { jaroWinkler: 0, levenshtein: 0, score: 0 };\n    } else {\n      const forms = [\n        [a.normName, b.normName],\n        [a.sortedName, b.sortedName],\n        [a.compactName, b.compactName],\n      ];\n      for (const [x, y] of forms) {\n        const s = blendedSimilarity(x, y, o);\n        if (!name || s.score > name.score) name = s;\n      }\n    }\n  }\n\n  let domain = null;\n  const da = a.domainInfo;\n  const db = b.domainInfo;\n  if (da && db && !da.shared && !db.shared) {\n    if (da.root === db.root) {\n      domain = { jaroWinkler: 1, levenshtein: 1, score: 1, sameRoot: true };\n      reasons.push('same-root-domain');\n      if (da.host !== db.host) reasons.push('subdomain-variant');\n    } else if (Math.min(da.label.length, db.label.length) < o.minDomainLabelLength) {\n      domain = { jaroWinkler: 0, levenshtein: 0, score: 0, sameRoot: false };\n    } else {\n      // Compare hyphen-free labels; \"globex\" vs \"globex-industries\" is a prefix match.\n      const la = da.label.replace(/-/g, '');\n      const lb = db.label.replace(/-/g, '');\n      domain = Object.assign(blendedSimilarity(la, lb, o), { sameRoot: false, prefixMatch: false });\n      const shorter = la.length <= lb.length ? la : lb;\n      const longer = la.length <= lb.length ? lb : la;\n      if (la !== lb && shorter.length >= o.minNameLength && longer.indexOf(shorter) === 0) {\n        domain.prefixMatch = true;\n        domain.score = Math.max(domain.score, o.domainPrefixScore);\n      }\n    }\n  }\n\n  let score;\n  if (domain && domain.sameRoot) score = name ? 0.9 + 0.1 * name.score : 0.95;\n  else if (name && domain) score = o.nameWeight * name.score + o.domainWeight * domain.score;\n  else if (name) score = name.score;\n  else if (domain) score = domain.score;\n  else score = 0;\n  if (exactName) score = Math.max(score, o.exactNameFloor);\n\n  if (name && !exactName && name.score >= o.threshold) reasons.push('name-similarity');\n  if (domain && domain.prefixMatch) reasons.push('domain-prefix');\n  if (domain && !domain.sameRoot && domain.score >= o.threshold) reasons.push('domain-similarity');\n\n  return {\n    score: round4(Math.min(1, score)),\n    nameJaroWinkler: name ? round4(name.jaroWinkler) : null,\n    nameLevenshtein: name ? round4(name.levenshtein) : null,\n    nameScore: name ? round4(name.score) : null,\n    domainScore: domain ? round4(domain.score) : null,\n    reasons,\n  };\n}\n\n// ---------------------------------------------------------------------------\n// Blocking, clustering, review queue\n// ---------------------------------------------------------------------------\n\n/** Candidate blocks: only records sharing at least one key are compared. */\nfunction blockingKeys(r) {\n  const keys = [];\n  if (r.domainInfo && !r.domainInfo.shared) {\n    keys.push('r:' + r.domainInfo.root);\n    if (r.domainInfo.label.length >= 3) keys.push('d:' + r.domainInfo.label.slice(0, 3));\n  }\n  if (r.compactName) {\n    keys.push('n:' + r.compactName.slice(0, 3));\n    const sortedCompact = r.sortedName.replace(/ /g, '');\n    const k = 'n:' + sortedCompact.slice(0, 3);\n    if (keys.indexOf(k) === -1) keys.push(k);\n  }\n  return keys;\n}\n\nfunction fnv1a(str, seed) {\n  let h = seed >>> 0;\n  for (let i = 0; i < str.length; i++) {\n    h ^= str.charCodeAt(i);\n    h = Math.imul(h, 0x01000193) >>> 0;\n  }\n  return h >>> 0;\n}\n\n/** Stable cluster ID derived from the member IDs: the same group gets the same ID every run. */\nfunction stableClusterId(ids) {\n  const key = ids.slice().sort(compareIds).join('|');\n  const h1 = fnv1a(key, 0x811c9dc5).toString(16).padStart(8, '0');\n  const h2 = fnv1a(key, 0x01000193).toString(16).padStart(8, '0');\n  return 'dup-' + h1 + h2;\n}\n\nfunction pickPrimary(members) {\n  const ts = (d) => {\n    const t = d ? Date.parse(d) : NaN;\n    return Number.isFinite(t) ? t : Infinity;\n  };\n  return members.slice().sort((x, y) =>\n    (y.numAssociatedDeals || 0) - (x.numAssociatedDeals || 0) ||\n    (y.annualRevenue || 0) - (x.annualRevenue || 0) ||\n    ts(x.createdate) - ts(y.createdate) ||\n    compareIds(x.id, y.id)\n  )[0];\n}\n\n/**\n * Run the full audit over raw HubSpot companies.\n * Returns { summary, clusters } — a consolidated, deduplicated review queue.\n */\nfunction findDuplicates(rawCompanies, options) {\n  const o = Object.assign({}, DEFAULT_MATCH_OPTIONS, options || {});\n  const input = Array.isArray(rawCompanies) ? rawCompanies : [];\n  const limited = Number.isFinite(o.maxCompanies) ? input.slice(0, o.maxCompanies) : input;\n\n  const byId = new Map();\n  let skipped = 0;\n  for (const raw of limited) {\n    const r = toRecord(raw, o);\n    if (!r.id || (!r.normName && !r.domainInfo) || byId.has(r.id)) { skipped++; continue; }\n    byId.set(r.id, r);\n  }\n  const records = Array.from(byId.values()).sort((x, y) => compareIds(x.id, y.id));\n\n  const blocks = new Map();\n  records.forEach((r, idx) => {\n    for (const key of blockingKeys(r)) {\n      if (!blocks.has(key)) blocks.set(key, []);\n      blocks.get(key).push(idx);\n    }\n  });\n\n  const seen = new Set();\n  const pairs = [];\n  const oversizedBlocks = [];\n  let comparedPairs = 0;\n  const sortedKeys = Array.from(blocks.keys()).sort();\n  for (const key of sortedKeys) {\n    const idxs = blocks.get(key);\n    if (idxs.length < 2) continue;\n    if (idxs.length > o.maxBlockSize) {\n      oversizedBlocks.push({ keyType: key.slice(0, 1), size: idxs.length });\n      continue;\n    }\n    for (let i = 0; i < idxs.length; i++) {\n      for (let j = i + 1; j < idxs.length; j++) {\n        const pk = idxs[i] * records.length + idxs[j];\n        if (seen.has(pk)) continue;\n        seen.add(pk);\n        comparedPairs++;\n        const cmp = compareRecords(records[idxs[i]], records[idxs[j]], o);\n        if (cmp.score >= o.threshold) pairs.push(Object.assign({ i: idxs[i], j: idxs[j] }, cmp));\n      }\n    }\n  }\n\n  // Union-find: overlapping pairs collapse into one review item per group.\n  const parent = records.map((_, i) => i);\n  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };\n  for (const p of pairs) {\n    const ra = find(p.i);\n    const rb = find(p.j);\n    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);\n  }\n  const groups = new Map();\n  for (const p of pairs) {\n    const root = find(p.i);\n    if (!groups.has(root)) groups.set(root, { members: new Set(), pairs: [] });\n    const g = groups.get(root);\n    g.members.add(p.i);\n    g.members.add(p.j);\n    g.pairs.push(p);\n  }\n\n  const clusters = [];\n  for (const g of groups.values()) {\n    const members = Array.from(g.members).map((i) => records[i]);\n    const primary = pickPrimary(members);\n    const ids = members.map((m) => m.id);\n    const reasons = [];\n    for (const p of g.pairs) for (const r of p.reasons) if (reasons.indexOf(r) === -1) reasons.push(r);\n    reasons.sort();\n    const scores = g.pairs.map((p) => p.score);\n    const orderedMembers = members.slice().sort((x, y) =>\n      (x.id === primary.id ? -1 : y.id === primary.id ? 1 : 0) || compareIds(x.id, y.id));\n    clusters.push({\n      clusterId: stableClusterId(ids),\n      size: members.length,\n      maxScore: Math.max.apply(null, scores),\n      minScore: Math.min.apply(null, scores),\n      reasons,\n      suggestedPrimaryId: primary.id,\n      members: orderedMembers.map((m) => ({\n        id: m.id,\n        name: m.name,\n        domain: m.domain,\n        website: m.website,\n        rootDomain: m.domainInfo ? m.domainInfo.root : null,\n        normalizedName: m.normName,\n        createdate: m.createdate,\n        numAssociatedDeals: m.numAssociatedDeals,\n        annualRevenue: m.annualRevenue,\n        isSuggestedPrimary: m.id === primary.id,\n      })),\n      pairs: g.pairs\n        .map((p) => ({\n          a: records[p.i].id,\n          b: records[p.j].id,\n          score: p.score,\n          nameJaroWinkler: p.nameJaroWinkler,\n          nameLevenshtein: p.nameLevenshtein,\n          nameScore: p.nameScore,\n          domainScore: p.domainScore,\n          reasons: p.reasons,\n        }))\n        .sort((x, y) => y.score - x.score || compareIds(x.a, y.a) || compareIds(x.b, y.b)),\n    });\n  }\n  clusters.sort((x, y) => y.maxScore - x.maxScore || y.size - x.size || (x.clusterId < y.clusterId ? -1 : 1));\n\n  return {\n    summary: {\n      totalInput: input.length,\n      totalRecords: records.length,\n      skippedRecords: skipped + (input.length - limited.length),\n      truncatedAtMaxCompanies: input.length > limited.length,\n      blocks: blocks.size,\n      comparedPairs,\n      flaggedPairs: pairs.length,\n      clusterCount: clusters.length,\n      recordsInClusters: clusters.reduce((n, c) => n + c.size, 0),\n      threshold: o.threshold,\n      oversizedBlocks,\n    },\n    clusters,\n  };\n}\n\n// ===== inlined from src/formatters.js (generated — edit the source file, not this node) =====\n/**\n * formatters.js — turns a matcher result into the review-queue outputs:\n * Slack Block Kit payload, Notion page bodies and a CSV breakdown.\n *\n * PURE MODULE: no require(), no I/O, no secrets. Inlined verbatim into the\n * n8n Code nodes \"Build Slack Payload\", \"Build Notion Pages\" and\n * \"Dry Run Preview\" by scripts/build-workflow.js.\n */\n\nconst NOTION_STATUS_DEFAULT = 'Needs Review';\n\nfunction createRunMeta(input) {\n  const i = input || {};\n  const portal = i.portal || {};\n  const settings = i.settings || {};\n  return {\n    runAt: i.runAt || new Date().toISOString(),\n    source: i.source || 'hubspot',\n    dryRun: settings.dryRun !== false,\n    sandboxMode: settings.sandboxMode !== false,\n    accountType: portal.accountType || null,\n    portalId: portal.portalId === undefined || portal.portalId === null ? null : String(portal.portalId),\n    uiDomain: portal.uiDomain || null,\n  };\n}\n\nfunction truncate(s, n) {\n  const str = s === undefined || s === null ? '' : String(s);\n  return str.length <= n ? str : str.slice(0, Math.max(0, n - 1)) + '…';\n}\n\nfunction escapeMrkdwn(s) {\n  return String(s === undefined || s === null ? '' : s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction hubspotRecordUrl(meta, id) {\n  if (!meta || !meta.portalId || !id) return null;\n  const host = /^[a-z0-9.-]+$/i.test(meta.uiDomain || '') ? meta.uiDomain : 'app.hubspot.com';\n  return 'https://' + host + '/contacts/' + encodeURIComponent(meta.portalId) + '/record/0-2/' + encodeURIComponent(id);\n}\n\n/** CSV cell with quoting and spreadsheet formula-injection protection. */\nfunction csvCell(v) {\n  let s = v === undefined || v === null ? '' : String(v);\n  if (/^[=+\\-@\\t\\r]/.test(s)) s = \"'\" + s;\n  if (/[\",\\r\\n]/.test(s)) s = '\"' + s.replace(/\"/g, '\"\"') + '\"';\n  return s;\n}\n\nconst CSV_COLUMNS = [\n  'cluster_id', 'cluster_max_score', 'cluster_size', 'record_id', 'name', 'domain', 'website',\n  'root_domain', 'suggested_primary', 'num_associated_deals', 'annual_revenue', 'createdate', 'reasons',\n];\n\nfunction toCsv(result) {\n  const lines = [CSV_COLUMNS.join(',')];\n  for (const c of (result && result.clusters) || []) {\n    for (const m of c.members) {\n      lines.push([\n        c.clusterId, c.maxScore, c.size, m.id, m.name, m.domain, m.website, m.rootDomain,\n        m.isSuggestedPrimary ? 'yes' : 'no', m.numAssociatedDeals, m.annualRevenue, m.createdate,\n        c.reasons.join('|'),\n      ].map(csvCell).join(','));\n    }\n  }\n  return lines.join('\\n') + '\\n';\n}\n\nfunction clusterTitle(c) {\n  const primary = c.members.find((m) => m.isSuggestedPrimary) || c.members[0];\n  const label = primary.name || primary.domain || primary.website || ('Company ' + primary.id);\n  return label + ' (+' + (c.size - 1) + ' similar)';\n}\n\n/**\n * Slack incoming-webhook payload (Block Kit). Stays inside Slack limits:\n * <= 50 blocks, <= 3000 chars per section, header <= 150 chars.\n */\nfunction buildSlackPayload(result, meta, options) {\n  const o = options || {};\n  const maxClusters = o.maxClusters || 10;\n  const maxMembers = o.maxMembersPerCluster || 8;\n  const csvLimit = o.csvCharLimit || 2400;\n  const s = result.summary;\n  const m = meta || {};\n  const title = (m.dryRun ? '[DRY RUN] ' : '') + 'HubSpot duplicate company review queue';\n\n  const blocks = [\n    { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: true } },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: '*Clusters to review:*\\n' + s.clusterCount },\n        { type: 'mrkdwn', text: '*Records involved:*\\n' + s.recordsInClusters },\n        { type: 'mrkdwn', text: '*Companies scanned:*\\n' + s.totalRecords },\n        { type: 'mrkdwn', text: '*Similarity threshold:*\\n' + s.threshold },\n      ],\n    },\n    {\n      type: 'context',\n      elements: [{\n        type: 'mrkdwn',\n        text: escapeMrkdwn('Portal type: ' + (m.accountType || 'unknown') + ' · Run: ' + (m.runAt || '') +\n          ' · Pairs compared: ' + s.comparedPairs + ' · Flagged pairs: ' + s.flaggedPairs),\n      }],\n    },\n    { type: 'divider' },\n  ];\n\n  const shown = result.clusters.slice(0, maxClusters);\n  shown.forEach((c, idx) => {\n    const lines = ['*' + (idx + 1) + '. ' + escapeMrkdwn(clusterTitle(c)) + '* — max score ' + c.maxScore.toFixed(2) + ' · ' + c.size + ' records'];\n    c.members.slice(0, maxMembers).forEach((mem) => {\n      const url = hubspotRecordUrl(m, mem.id);\n      const idText = url ? '<' + url + '|ID ' + escapeMrkdwn(mem.id) + '>' : 'ID ' + escapeMrkdwn(mem.id);\n      const dom = mem.domain || mem.website;\n      lines.push('• ' + escapeMrkdwn(mem.name || '(no name)') + (dom ? ' (' + escapeMrkdwn(dom) + ')' : '') +\n        ' — ' + idText + ' · deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' · :star: suggested primary' : ''));\n    });\n    if (c.members.length > maxMembers) lines.push('_…and ' + (c.members.length - maxMembers) + ' more_');\n    lines.push('_Reasons:_ ' + escapeMrkdwn(c.reasons.join(', ')) + ' · _Cluster:_ `' + c.clusterId + '`');\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: truncate(lines.join('\\n'), 2900) } });\n  });\n\n  if (result.clusters.length > shown.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '+' + (result.clusters.length - shown.length) + ' more cluster(s) in the full report.' }] });\n  }\n  if (s.oversizedBlocks && s.oversizedBlocks.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: ':warning: ' + s.oversizedBlocks.length + ' candidate block(s) exceeded MAX_BLOCK_SIZE and were skipped.' }] });\n  }\n\n  if (result.clusters.length) {\n    const csv = toCsv(result);\n    let snippet = csv;\n    let note = '';\n    if (csv.length > csvLimit) {\n      snippet = csv.slice(0, csvLimit);\n      snippet = snippet.slice(0, snippet.lastIndexOf('\\n') + 1);\n      note = ' (truncated — run the CLI with --csv for the full file)';\n    }\n    blocks.push({ type: 'divider' });\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*CSV breakdown*' + note + '\\n```' + escapeMrkdwn(snippet) + '```' } });\n  }\n\n  return {\n    text: title + ': ' + s.clusterCount + ' cluster(s), ' + s.recordsInClusters + ' record(s) to review.',\n    blocks: blocks.slice(0, 50),\n  };\n}\n\nfunction richText(content, url) {\n  const text = { content: truncate(content, 2000) };\n  if (url) text.link = { url };\n  return [{ type: 'text', text }];\n}\n\n/**\n * Notion pages for the review-queue database. The database parent is\n * deliberately NOT included: the sender adds it from NOTION_DATABASE_ID at\n * send time, so the ID never appears in workflow item data or reports.\n */\nfunction buildNotionPages(result, meta) {\n  const m = meta || {};\n  return result.clusters.map((c) => {\n    const primary = c.members.find((x) => x.isSuggestedPrimary) || c.members[0];\n    const domains = [];\n    for (const mem of c.members) {\n      const d = mem.rootDomain || mem.domain;\n      if (d && domains.indexOf(d) === -1) domains.push(d);\n    }\n    const children = [\n      { object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Records') } },\n    ];\n    for (const mem of c.members.slice(0, 40)) {\n      const label = (mem.name || '(no name)') + ' — ID ' + mem.id +\n        (mem.domain || mem.website ? ' — ' + (mem.domain || mem.website) : '') +\n        ' — deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' — suggested primary' : '');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(label, hubspotRecordUrl(m, mem.id)) } });\n    }\n    children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Matched pairs') } });\n    for (const p of c.pairs.slice(0, 50)) {\n      const detail = p.a + ' ↔ ' + p.b + ': score ' + p.score +\n        (p.nameScore !== null ? ' · name JW ' + p.nameJaroWinkler + ' / Lev ' + p.nameLevenshtein : '') +\n        (p.domainScore !== null ? ' · domain ' + p.domainScore : '') +\n        ' · ' + p.reasons.join(', ');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(detail) } });\n    }\n    children.push({\n      object: 'block', type: 'paragraph',\n      paragraph: { rich_text: richText('Generated by n8n-hubspot-duplicate-company-domain-fuzzy-matcher. Review before merging in HubSpot; merges cannot be undone.') },\n    });\n\n    return {\n      clusterId: c.clusterId,\n      query: { filter: { property: 'Cluster ID', rich_text: { equals: c.clusterId } }, page_size: 1 },\n      page: {\n        properties: {\n          Name: { title: richText(clusterTitle(c)) },\n          'Cluster ID': { rich_text: richText(c.clusterId) },\n          Status: { select: { name: NOTION_STATUS_DEFAULT } },\n          'Max Score': { number: c.maxScore },\n          'Record Count': { number: c.size },\n          'Suggested Primary': { rich_text: richText((primary.name || '(no name)') + ' (ID ' + primary.id + ')', hubspotRecordUrl(m, primary.id)) },\n          'HubSpot IDs': { rich_text: richText(c.members.map((x) => x.id).join(', ')) },\n          Domains: { rich_text: richText(domains.join(', ')) },\n          Reasons: { multi_select: c.reasons.map((r) => ({ name: r })) },\n          'Detected At': { date: { start: m.runAt || new Date().toISOString() } },\n        },\n        children,\n      },\n    };\n  });\n}\n\n/** Everything a dry run would have sent, without sending anything. */\nfunction buildDryRunPreview(result, meta) {\n  return {\n    dryRun: true,\n    note: 'DRY_RUN is on: nothing was sent to Slack or Notion. Set DRY_RUN=false to deliver.',\n    meta,\n    summary: result.summary,\n    slackPayload: buildSlackPayload(result, meta),\n    notionPages: buildNotionPages(result, meta),\n    csv: toCsv(result),\n  };\n}\n\n// ===== n8n glue =====\nconst config = $('Config & Safety Gate').first().json.config;\nconst portal = $('Sandbox Verification').first().json.portal;\nconst companies = [];\nfor (const item of $input.all()) {\n  const body = item.json || {};\n  if (Array.isArray(body.results)) companies.push(...body.results);\n  else if (body.id) companies.push(body);\n}\nconst result = findDuplicates(companies, {\n  threshold: config.similarityThreshold,\n  maxBlockSize: config.maxBlockSize,\n  maxCompanies: config.maxCompanies,\n});\nconst meta = createRunMeta({ settings: config, portal, source: 'hubspot', runAt: new Date().toISOString() });\nreturn [{ json: { config, meta, result } }];\n"
+      },
+      "id": "e4ba7f53-3c37-4449-a0fa-813d0821d563",
+      "name": "Normalize & Fuzzy Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2acfa79-42ce-4f5f-a6f9-4243844029c9",
+              "leftValue": "={{ $json.result.clusters.length }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9abb91d9-5ecd-4173-a89d-4f876c673369",
+      "name": "Any Clusters?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1440,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "9b4ba8e0-dc5b-4c76-aa14-01cafbae6c30",
+      "name": "No Duplicates Found",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "66d48dfe-8dd8-4678-ad8f-c4e4318a196e",
+              "leftValue": "={{ $json.config.dryRun }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b254c7ec-df0b-4f52-a2a1-5b7e4dab0f9c",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/formatters.js (generated — edit the source file, not this node) =====\n/**\n * formatters.js — turns a matcher result into the review-queue outputs:\n * Slack Block Kit payload, Notion page bodies and a CSV breakdown.\n *\n * PURE MODULE: no require(), no I/O, no secrets. Inlined verbatim into the\n * n8n Code nodes \"Build Slack Payload\", \"Build Notion Pages\" and\n * \"Dry Run Preview\" by scripts/build-workflow.js.\n */\n\nconst NOTION_STATUS_DEFAULT = 'Needs Review';\n\nfunction createRunMeta(input) {\n  const i = input || {};\n  const portal = i.portal || {};\n  const settings = i.settings || {};\n  return {\n    runAt: i.runAt || new Date().toISOString(),\n    source: i.source || 'hubspot',\n    dryRun: settings.dryRun !== false,\n    sandboxMode: settings.sandboxMode !== false,\n    accountType: portal.accountType || null,\n    portalId: portal.portalId === undefined || portal.portalId === null ? null : String(portal.portalId),\n    uiDomain: portal.uiDomain || null,\n  };\n}\n\nfunction truncate(s, n) {\n  const str = s === undefined || s === null ? '' : String(s);\n  return str.length <= n ? str : str.slice(0, Math.max(0, n - 1)) + '…';\n}\n\nfunction escapeMrkdwn(s) {\n  return String(s === undefined || s === null ? '' : s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction hubspotRecordUrl(meta, id) {\n  if (!meta || !meta.portalId || !id) return null;\n  const host = /^[a-z0-9.-]+$/i.test(meta.uiDomain || '') ? meta.uiDomain : 'app.hubspot.com';\n  return 'https://' + host + '/contacts/' + encodeURIComponent(meta.portalId) + '/record/0-2/' + encodeURIComponent(id);\n}\n\n/** CSV cell with quoting and spreadsheet formula-injection protection. */\nfunction csvCell(v) {\n  let s = v === undefined || v === null ? '' : String(v);\n  if (/^[=+\\-@\\t\\r]/.test(s)) s = \"'\" + s;\n  if (/[\",\\r\\n]/.test(s)) s = '\"' + s.replace(/\"/g, '\"\"') + '\"';\n  return s;\n}\n\nconst CSV_COLUMNS = [\n  'cluster_id', 'cluster_max_score', 'cluster_size', 'record_id', 'name', 'domain', 'website',\n  'root_domain', 'suggested_primary', 'num_associated_deals', 'annual_revenue', 'createdate', 'reasons',\n];\n\nfunction toCsv(result) {\n  const lines = [CSV_COLUMNS.join(',')];\n  for (const c of (result && result.clusters) || []) {\n    for (const m of c.members) {\n      lines.push([\n        c.clusterId, c.maxScore, c.size, m.id, m.name, m.domain, m.website, m.rootDomain,\n        m.isSuggestedPrimary ? 'yes' : 'no', m.numAssociatedDeals, m.annualRevenue, m.createdate,\n        c.reasons.join('|'),\n      ].map(csvCell).join(','));\n    }\n  }\n  return lines.join('\\n') + '\\n';\n}\n\nfunction clusterTitle(c) {\n  const primary = c.members.find((m) => m.isSuggestedPrimary) || c.members[0];\n  const label = primary.name || primary.domain || primary.website || ('Company ' + primary.id);\n  return label + ' (+' + (c.size - 1) + ' similar)';\n}\n\n/**\n * Slack incoming-webhook payload (Block Kit). Stays inside Slack limits:\n * <= 50 blocks, <= 3000 chars per section, header <= 150 chars.\n */\nfunction buildSlackPayload(result, meta, options) {\n  const o = options || {};\n  const maxClusters = o.maxClusters || 10;\n  const maxMembers = o.maxMembersPerCluster || 8;\n  const csvLimit = o.csvCharLimit || 2400;\n  const s = result.summary;\n  const m = meta || {};\n  const title = (m.dryRun ? '[DRY RUN] ' : '') + 'HubSpot duplicate company review queue';\n\n  const blocks = [\n    { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: true } },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: '*Clusters to review:*\\n' + s.clusterCount },\n        { type: 'mrkdwn', text: '*Records involved:*\\n' + s.recordsInClusters },\n        { type: 'mrkdwn', text: '*Companies scanned:*\\n' + s.totalRecords },\n        { type: 'mrkdwn', text: '*Similarity threshold:*\\n' + s.threshold },\n      ],\n    },\n    {\n      type: 'context',\n      elements: [{\n        type: 'mrkdwn',\n        text: escapeMrkdwn('Portal type: ' + (m.accountType || 'unknown') + ' · Run: ' + (m.runAt || '') +\n          ' · Pairs compared: ' + s.comparedPairs + ' · Flagged pairs: ' + s.flaggedPairs),\n      }],\n    },\n    { type: 'divider' },\n  ];\n\n  const shown = result.clusters.slice(0, maxClusters);\n  shown.forEach((c, idx) => {\n    const lines = ['*' + (idx + 1) + '. ' + escapeMrkdwn(clusterTitle(c)) + '* — max score ' + c.maxScore.toFixed(2) + ' · ' + c.size + ' records'];\n    c.members.slice(0, maxMembers).forEach((mem) => {\n      const url = hubspotRecordUrl(m, mem.id);\n      const idText = url ? '<' + url + '|ID ' + escapeMrkdwn(mem.id) + '>' : 'ID ' + escapeMrkdwn(mem.id);\n      const dom = mem.domain || mem.website;\n      lines.push('• ' + escapeMrkdwn(mem.name || '(no name)') + (dom ? ' (' + escapeMrkdwn(dom) + ')' : '') +\n        ' — ' + idText + ' · deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' · :star: suggested primary' : ''));\n    });\n    if (c.members.length > maxMembers) lines.push('_…and ' + (c.members.length - maxMembers) + ' more_');\n    lines.push('_Reasons:_ ' + escapeMrkdwn(c.reasons.join(', ')) + ' · _Cluster:_ `' + c.clusterId + '`');\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: truncate(lines.join('\\n'), 2900) } });\n  });\n\n  if (result.clusters.length > shown.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '+' + (result.clusters.length - shown.length) + ' more cluster(s) in the full report.' }] });\n  }\n  if (s.oversizedBlocks && s.oversizedBlocks.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: ':warning: ' + s.oversizedBlocks.length + ' candidate block(s) exceeded MAX_BLOCK_SIZE and were skipped.' }] });\n  }\n\n  if (result.clusters.length) {\n    const csv = toCsv(result);\n    let snippet = csv;\n    let note = '';\n    if (csv.length > csvLimit) {\n      snippet = csv.slice(0, csvLimit);\n      snippet = snippet.slice(0, snippet.lastIndexOf('\\n') + 1);\n      note = ' (truncated — run the CLI with --csv for the full file)';\n    }\n    blocks.push({ type: 'divider' });\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*CSV breakdown*' + note + '\\n```' + escapeMrkdwn(snippet) + '```' } });\n  }\n\n  return {\n    text: title + ': ' + s.clusterCount + ' cluster(s), ' + s.recordsInClusters + ' record(s) to review.',\n    blocks: blocks.slice(0, 50),\n  };\n}\n\nfunction richText(content, url) {\n  const text = { content: truncate(content, 2000) };\n  if (url) text.link = { url };\n  return [{ type: 'text', text }];\n}\n\n/**\n * Notion pages for the review-queue database. The database parent is\n * deliberately NOT included: the sender adds it from NOTION_DATABASE_ID at\n * send time, so the ID never appears in workflow item data or reports.\n */\nfunction buildNotionPages(result, meta) {\n  const m = meta || {};\n  return result.clusters.map((c) => {\n    const primary = c.members.find((x) => x.isSuggestedPrimary) || c.members[0];\n    const domains = [];\n    for (const mem of c.members) {\n      const d = mem.rootDomain || mem.domain;\n      if (d && domains.indexOf(d) === -1) domains.push(d);\n    }\n    const children = [\n      { object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Records') } },\n    ];\n    for (const mem of c.members.slice(0, 40)) {\n      const label = (mem.name || '(no name)') + ' — ID ' + mem.id +\n        (mem.domain || mem.website ? ' — ' + (mem.domain || mem.website) : '') +\n        ' — deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' — suggested primary' : '');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(label, hubspotRecordUrl(m, mem.id)) } });\n    }\n    children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Matched pairs') } });\n    for (const p of c.pairs.slice(0, 50)) {\n      const detail = p.a + ' ↔ ' + p.b + ': score ' + p.score +\n        (p.nameScore !== null ? ' · name JW ' + p.nameJaroWinkler + ' / Lev ' + p.nameLevenshtein : '') +\n        (p.domainScore !== null ? ' · domain ' + p.domainScore : '') +\n        ' · ' + p.reasons.join(', ');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(detail) } });\n    }\n    children.push({\n      object: 'block', type: 'paragraph',\n      paragraph: { rich_text: richText('Generated by n8n-hubspot-duplicate-company-domain-fuzzy-matcher. Review before merging in HubSpot; merges cannot be undone.') },\n    });\n\n    return {\n      clusterId: c.clusterId,\n      query: { filter: { property: 'Cluster ID', rich_text: { equals: c.clusterId } }, page_size: 1 },\n      page: {\n        properties: {\n          Name: { title: richText(clusterTitle(c)) },\n          'Cluster ID': { rich_text: richText(c.clusterId) },\n          Status: { select: { name: NOTION_STATUS_DEFAULT } },\n          'Max Score': { number: c.maxScore },\n          'Record Count': { number: c.size },\n          'Suggested Primary': { rich_text: richText((primary.name || '(no name)') + ' (ID ' + primary.id + ')', hubspotRecordUrl(m, primary.id)) },\n          'HubSpot IDs': { rich_text: richText(c.members.map((x) => x.id).join(', ')) },\n          Domains: { rich_text: richText(domains.join(', ')) },\n          Reasons: { multi_select: c.reasons.map((r) => ({ name: r })) },\n          'Detected At': { date: { start: m.runAt || new Date().toISOString() } },\n        },\n        children,\n      },\n    };\n  });\n}\n\n/** Everything a dry run would have sent, without sending anything. */\nfunction buildDryRunPreview(result, meta) {\n  return {\n    dryRun: true,\n    note: 'DRY_RUN is on: nothing was sent to Slack or Notion. Set DRY_RUN=false to deliver.',\n    meta,\n    summary: result.summary,\n    slackPayload: buildSlackPayload(result, meta),\n    notionPages: buildNotionPages(result, meta),\n    csv: toCsv(result),\n  };\n}\n\n// ===== n8n glue =====\nconst { result, meta } = $('Normalize & Fuzzy Match').first().json;\nreturn [{ json: buildDryRunPreview(result, meta) }];\n"
+      },
+      "id": "36bb38fb-0349-4b6d-af4c-9919e4e44d6b",
+      "name": "Dry Run Preview",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fcb3d2dc-8c26-4102-a406-3c76b6b6bc0c",
+                    "leftValue": "={{ $json.config.notifySlack }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Slack"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "70954b25-a82e-4c03-ad64-78ef4377d375",
+                    "leftValue": "={{ $json.config.notifyNotion }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Notion"
+            }
+          ]
+        },
+        "options": {
+          "allMatchingOutputs": true
+        }
+      },
+      "id": "6cb9286e-8f29-4ce4-a775-cd9076c3579e",
+      "name": "Route Notifications",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1920,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/formatters.js (generated — edit the source file, not this node) =====\n/**\n * formatters.js — turns a matcher result into the review-queue outputs:\n * Slack Block Kit payload, Notion page bodies and a CSV breakdown.\n *\n * PURE MODULE: no require(), no I/O, no secrets. Inlined verbatim into the\n * n8n Code nodes \"Build Slack Payload\", \"Build Notion Pages\" and\n * \"Dry Run Preview\" by scripts/build-workflow.js.\n */\n\nconst NOTION_STATUS_DEFAULT = 'Needs Review';\n\nfunction createRunMeta(input) {\n  const i = input || {};\n  const portal = i.portal || {};\n  const settings = i.settings || {};\n  return {\n    runAt: i.runAt || new Date().toISOString(),\n    source: i.source || 'hubspot',\n    dryRun: settings.dryRun !== false,\n    sandboxMode: settings.sandboxMode !== false,\n    accountType: portal.accountType || null,\n    portalId: portal.portalId === undefined || portal.portalId === null ? null : String(portal.portalId),\n    uiDomain: portal.uiDomain || null,\n  };\n}\n\nfunction truncate(s, n) {\n  const str = s === undefined || s === null ? '' : String(s);\n  return str.length <= n ? str : str.slice(0, Math.max(0, n - 1)) + '…';\n}\n\nfunction escapeMrkdwn(s) {\n  return String(s === undefined || s === null ? '' : s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction hubspotRecordUrl(meta, id) {\n  if (!meta || !meta.portalId || !id) return null;\n  const host = /^[a-z0-9.-]+$/i.test(meta.uiDomain || '') ? meta.uiDomain : 'app.hubspot.com';\n  return 'https://' + host + '/contacts/' + encodeURIComponent(meta.portalId) + '/record/0-2/' + encodeURIComponent(id);\n}\n\n/** CSV cell with quoting and spreadsheet formula-injection protection. */\nfunction csvCell(v) {\n  let s = v === undefined || v === null ? '' : String(v);\n  if (/^[=+\\-@\\t\\r]/.test(s)) s = \"'\" + s;\n  if (/[\",\\r\\n]/.test(s)) s = '\"' + s.replace(/\"/g, '\"\"') + '\"';\n  return s;\n}\n\nconst CSV_COLUMNS = [\n  'cluster_id', 'cluster_max_score', 'cluster_size', 'record_id', 'name', 'domain', 'website',\n  'root_domain', 'suggested_primary', 'num_associated_deals', 'annual_revenue', 'createdate', 'reasons',\n];\n\nfunction toCsv(result) {\n  const lines = [CSV_COLUMNS.join(',')];\n  for (const c of (result && result.clusters) || []) {\n    for (const m of c.members) {\n      lines.push([\n        c.clusterId, c.maxScore, c.size, m.id, m.name, m.domain, m.website, m.rootDomain,\n        m.isSuggestedPrimary ? 'yes' : 'no', m.numAssociatedDeals, m.annualRevenue, m.createdate,\n        c.reasons.join('|'),\n      ].map(csvCell).join(','));\n    }\n  }\n  return lines.join('\\n') + '\\n';\n}\n\nfunction clusterTitle(c) {\n  const primary = c.members.find((m) => m.isSuggestedPrimary) || c.members[0];\n  const label = primary.name || primary.domain || primary.website || ('Company ' + primary.id);\n  return label + ' (+' + (c.size - 1) + ' similar)';\n}\n\n/**\n * Slack incoming-webhook payload (Block Kit). Stays inside Slack limits:\n * <= 50 blocks, <= 3000 chars per section, header <= 150 chars.\n */\nfunction buildSlackPayload(result, meta, options) {\n  const o = options || {};\n  const maxClusters = o.maxClusters || 10;\n  const maxMembers = o.maxMembersPerCluster || 8;\n  const csvLimit = o.csvCharLimit || 2400;\n  const s = result.summary;\n  const m = meta || {};\n  const title = (m.dryRun ? '[DRY RUN] ' : '') + 'HubSpot duplicate company review queue';\n\n  const blocks = [\n    { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: true } },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: '*Clusters to review:*\\n' + s.clusterCount },\n        { type: 'mrkdwn', text: '*Records involved:*\\n' + s.recordsInClusters },\n        { type: 'mrkdwn', text: '*Companies scanned:*\\n' + s.totalRecords },\n        { type: 'mrkdwn', text: '*Similarity threshold:*\\n' + s.threshold },\n      ],\n    },\n    {\n      type: 'context',\n      elements: [{\n        type: 'mrkdwn',\n        text: escapeMrkdwn('Portal type: ' + (m.accountType || 'unknown') + ' · Run: ' + (m.runAt || '') +\n          ' · Pairs compared: ' + s.comparedPairs + ' · Flagged pairs: ' + s.flaggedPairs),\n      }],\n    },\n    { type: 'divider' },\n  ];\n\n  const shown = result.clusters.slice(0, maxClusters);\n  shown.forEach((c, idx) => {\n    const lines = ['*' + (idx + 1) + '. ' + escapeMrkdwn(clusterTitle(c)) + '* — max score ' + c.maxScore.toFixed(2) + ' · ' + c.size + ' records'];\n    c.members.slice(0, maxMembers).forEach((mem) => {\n      const url = hubspotRecordUrl(m, mem.id);\n      const idText = url ? '<' + url + '|ID ' + escapeMrkdwn(mem.id) + '>' : 'ID ' + escapeMrkdwn(mem.id);\n      const dom = mem.domain || mem.website;\n      lines.push('• ' + escapeMrkdwn(mem.name || '(no name)') + (dom ? ' (' + escapeMrkdwn(dom) + ')' : '') +\n        ' — ' + idText + ' · deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' · :star: suggested primary' : ''));\n    });\n    if (c.members.length > maxMembers) lines.push('_…and ' + (c.members.length - maxMembers) + ' more_');\n    lines.push('_Reasons:_ ' + escapeMrkdwn(c.reasons.join(', ')) + ' · _Cluster:_ `' + c.clusterId + '`');\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: truncate(lines.join('\\n'), 2900) } });\n  });\n\n  if (result.clusters.length > shown.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '+' + (result.clusters.length - shown.length) + ' more cluster(s) in the full report.' }] });\n  }\n  if (s.oversizedBlocks && s.oversizedBlocks.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: ':warning: ' + s.oversizedBlocks.length + ' candidate block(s) exceeded MAX_BLOCK_SIZE and were skipped.' }] });\n  }\n\n  if (result.clusters.length) {\n    const csv = toCsv(result);\n    let snippet = csv;\n    let note = '';\n    if (csv.length > csvLimit) {\n      snippet = csv.slice(0, csvLimit);\n      snippet = snippet.slice(0, snippet.lastIndexOf('\\n') + 1);\n      note = ' (truncated — run the CLI with --csv for the full file)';\n    }\n    blocks.push({ type: 'divider' });\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*CSV breakdown*' + note + '\\n```' + escapeMrkdwn(snippet) + '```' } });\n  }\n\n  return {\n    text: title + ': ' + s.clusterCount + ' cluster(s), ' + s.recordsInClusters + ' record(s) to review.',\n    blocks: blocks.slice(0, 50),\n  };\n}\n\nfunction richText(content, url) {\n  const text = { content: truncate(content, 2000) };\n  if (url) text.link = { url };\n  return [{ type: 'text', text }];\n}\n\n/**\n * Notion pages for the review-queue database. The database parent is\n * deliberately NOT included: the sender adds it from NOTION_DATABASE_ID at\n * send time, so the ID never appears in workflow item data or reports.\n */\nfunction buildNotionPages(result, meta) {\n  const m = meta || {};\n  return result.clusters.map((c) => {\n    const primary = c.members.find((x) => x.isSuggestedPrimary) || c.members[0];\n    const domains = [];\n    for (const mem of c.members) {\n      const d = mem.rootDomain || mem.domain;\n      if (d && domains.indexOf(d) === -1) domains.push(d);\n    }\n    const children = [\n      { object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Records') } },\n    ];\n    for (const mem of c.members.slice(0, 40)) {\n      const label = (mem.name || '(no name)') + ' — ID ' + mem.id +\n        (mem.domain || mem.website ? ' — ' + (mem.domain || mem.website) : '') +\n        ' — deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' — suggested primary' : '');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(label, hubspotRecordUrl(m, mem.id)) } });\n    }\n    children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Matched pairs') } });\n    for (const p of c.pairs.slice(0, 50)) {\n      const detail = p.a + ' ↔ ' + p.b + ': score ' + p.score +\n        (p.nameScore !== null ? ' · name JW ' + p.nameJaroWinkler + ' / Lev ' + p.nameLevenshtein : '') +\n        (p.domainScore !== null ? ' · domain ' + p.domainScore : '') +\n        ' · ' + p.reasons.join(', ');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(detail) } });\n    }\n    children.push({\n      object: 'block', type: 'paragraph',\n      paragraph: { rich_text: richText('Generated by n8n-hubspot-duplicate-company-domain-fuzzy-matcher. Review before merging in HubSpot; merges cannot be undone.') },\n    });\n\n    return {\n      clusterId: c.clusterId,\n      query: { filter: { property: 'Cluster ID', rich_text: { equals: c.clusterId } }, page_size: 1 },\n      page: {\n        properties: {\n          Name: { title: richText(clusterTitle(c)) },\n          'Cluster ID': { rich_text: richText(c.clusterId) },\n          Status: { select: { name: NOTION_STATUS_DEFAULT } },\n          'Max Score': { number: c.maxScore },\n          'Record Count': { number: c.size },\n          'Suggested Primary': { rich_text: richText((primary.name || '(no name)') + ' (ID ' + primary.id + ')', hubspotRecordUrl(m, primary.id)) },\n          'HubSpot IDs': { rich_text: richText(c.members.map((x) => x.id).join(', ')) },\n          Domains: { rich_text: richText(domains.join(', ')) },\n          Reasons: { multi_select: c.reasons.map((r) => ({ name: r })) },\n          'Detected At': { date: { start: m.runAt || new Date().toISOString() } },\n        },\n        children,\n      },\n    };\n  });\n}\n\n/** Everything a dry run would have sent, without sending anything. */\nfunction buildDryRunPreview(result, meta) {\n  return {\n    dryRun: true,\n    note: 'DRY_RUN is on: nothing was sent to Slack or Notion. Set DRY_RUN=false to deliver.',\n    meta,\n    summary: result.summary,\n    slackPayload: buildSlackPayload(result, meta),\n    notionPages: buildNotionPages(result, meta),\n    csv: toCsv(result),\n  };\n}\n\n// ===== n8n glue =====\nconst { result, meta } = $('Normalize & Fuzzy Match').first().json;\nreturn [{ json: { slackPayload: buildSlackPayload(result, meta) } }];\n"
+      },
+      "id": "b480cbc1-5d52-48cf-aaf4-1e2ba55cdaf1",
+      "name": "Build Slack Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        160
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.slackPayload) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "f4327592-4fce-47bc-a190-73f0a5b8d742",
+      "name": "Slack: Post Review Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/formatters.js (generated — edit the source file, not this node) =====\n/**\n * formatters.js — turns a matcher result into the review-queue outputs:\n * Slack Block Kit payload, Notion page bodies and a CSV breakdown.\n *\n * PURE MODULE: no require(), no I/O, no secrets. Inlined verbatim into the\n * n8n Code nodes \"Build Slack Payload\", \"Build Notion Pages\" and\n * \"Dry Run Preview\" by scripts/build-workflow.js.\n */\n\nconst NOTION_STATUS_DEFAULT = 'Needs Review';\n\nfunction createRunMeta(input) {\n  const i = input || {};\n  const portal = i.portal || {};\n  const settings = i.settings || {};\n  return {\n    runAt: i.runAt || new Date().toISOString(),\n    source: i.source || 'hubspot',\n    dryRun: settings.dryRun !== false,\n    sandboxMode: settings.sandboxMode !== false,\n    accountType: portal.accountType || null,\n    portalId: portal.portalId === undefined || portal.portalId === null ? null : String(portal.portalId),\n    uiDomain: portal.uiDomain || null,\n  };\n}\n\nfunction truncate(s, n) {\n  const str = s === undefined || s === null ? '' : String(s);\n  return str.length <= n ? str : str.slice(0, Math.max(0, n - 1)) + '…';\n}\n\nfunction escapeMrkdwn(s) {\n  return String(s === undefined || s === null ? '' : s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction hubspotRecordUrl(meta, id) {\n  if (!meta || !meta.portalId || !id) return null;\n  const host = /^[a-z0-9.-]+$/i.test(meta.uiDomain || '') ? meta.uiDomain : 'app.hubspot.com';\n  return 'https://' + host + '/contacts/' + encodeURIComponent(meta.portalId) + '/record/0-2/' + encodeURIComponent(id);\n}\n\n/** CSV cell with quoting and spreadsheet formula-injection protection. */\nfunction csvCell(v) {\n  let s = v === undefined || v === null ? '' : String(v);\n  if (/^[=+\\-@\\t\\r]/.test(s)) s = \"'\" + s;\n  if (/[\",\\r\\n]/.test(s)) s = '\"' + s.replace(/\"/g, '\"\"') + '\"';\n  return s;\n}\n\nconst CSV_COLUMNS = [\n  'cluster_id', 'cluster_max_score', 'cluster_size', 'record_id', 'name', 'domain', 'website',\n  'root_domain', 'suggested_primary', 'num_associated_deals', 'annual_revenue', 'createdate', 'reasons',\n];\n\nfunction toCsv(result) {\n  const lines = [CSV_COLUMNS.join(',')];\n  for (const c of (result && result.clusters) || []) {\n    for (const m of c.members) {\n      lines.push([\n        c.clusterId, c.maxScore, c.size, m.id, m.name, m.domain, m.website, m.rootDomain,\n        m.isSuggestedPrimary ? 'yes' : 'no', m.numAssociatedDeals, m.annualRevenue, m.createdate,\n        c.reasons.join('|'),\n      ].map(csvCell).join(','));\n    }\n  }\n  return lines.join('\\n') + '\\n';\n}\n\nfunction clusterTitle(c) {\n  const primary = c.members.find((m) => m.isSuggestedPrimary) || c.members[0];\n  const label = primary.name || primary.domain || primary.website || ('Company ' + primary.id);\n  return label + ' (+' + (c.size - 1) + ' similar)';\n}\n\n/**\n * Slack incoming-webhook payload (Block Kit). Stays inside Slack limits:\n * <= 50 blocks, <= 3000 chars per section, header <= 150 chars.\n */\nfunction buildSlackPayload(result, meta, options) {\n  const o = options || {};\n  const maxClusters = o.maxClusters || 10;\n  const maxMembers = o.maxMembersPerCluster || 8;\n  const csvLimit = o.csvCharLimit || 2400;\n  const s = result.summary;\n  const m = meta || {};\n  const title = (m.dryRun ? '[DRY RUN] ' : '') + 'HubSpot duplicate company review queue';\n\n  const blocks = [\n    { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: true } },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: '*Clusters to review:*\\n' + s.clusterCount },\n        { type: 'mrkdwn', text: '*Records involved:*\\n' + s.recordsInClusters },\n        { type: 'mrkdwn', text: '*Companies scanned:*\\n' + s.totalRecords },\n        { type: 'mrkdwn', text: '*Similarity threshold:*\\n' + s.threshold },\n      ],\n    },\n    {\n      type: 'context',\n      elements: [{\n        type: 'mrkdwn',\n        text: escapeMrkdwn('Portal type: ' + (m.accountType || 'unknown') + ' · Run: ' + (m.runAt || '') +\n          ' · Pairs compared: ' + s.comparedPairs + ' · Flagged pairs: ' + s.flaggedPairs),\n      }],\n    },\n    { type: 'divider' },\n  ];\n\n  const shown = result.clusters.slice(0, maxClusters);\n  shown.forEach((c, idx) => {\n    const lines = ['*' + (idx + 1) + '. ' + escapeMrkdwn(clusterTitle(c)) + '* — max score ' + c.maxScore.toFixed(2) + ' · ' + c.size + ' records'];\n    c.members.slice(0, maxMembers).forEach((mem) => {\n      const url = hubspotRecordUrl(m, mem.id);\n      const idText = url ? '<' + url + '|ID ' + escapeMrkdwn(mem.id) + '>' : 'ID ' + escapeMrkdwn(mem.id);\n      const dom = mem.domain || mem.website;\n      lines.push('• ' + escapeMrkdwn(mem.name || '(no name)') + (dom ? ' (' + escapeMrkdwn(dom) + ')' : '') +\n        ' — ' + idText + ' · deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' · :star: suggested primary' : ''));\n    });\n    if (c.members.length > maxMembers) lines.push('_…and ' + (c.members.length - maxMembers) + ' more_');\n    lines.push('_Reasons:_ ' + escapeMrkdwn(c.reasons.join(', ')) + ' · _Cluster:_ `' + c.clusterId + '`');\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: truncate(lines.join('\\n'), 2900) } });\n  });\n\n  if (result.clusters.length > shown.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '+' + (result.clusters.length - shown.length) + ' more cluster(s) in the full report.' }] });\n  }\n  if (s.oversizedBlocks && s.oversizedBlocks.length) {\n    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: ':warning: ' + s.oversizedBlocks.length + ' candidate block(s) exceeded MAX_BLOCK_SIZE and were skipped.' }] });\n  }\n\n  if (result.clusters.length) {\n    const csv = toCsv(result);\n    let snippet = csv;\n    let note = '';\n    if (csv.length > csvLimit) {\n      snippet = csv.slice(0, csvLimit);\n      snippet = snippet.slice(0, snippet.lastIndexOf('\\n') + 1);\n      note = ' (truncated — run the CLI with --csv for the full file)';\n    }\n    blocks.push({ type: 'divider' });\n    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*CSV breakdown*' + note + '\\n```' + escapeMrkdwn(snippet) + '```' } });\n  }\n\n  return {\n    text: title + ': ' + s.clusterCount + ' cluster(s), ' + s.recordsInClusters + ' record(s) to review.',\n    blocks: blocks.slice(0, 50),\n  };\n}\n\nfunction richText(content, url) {\n  const text = { content: truncate(content, 2000) };\n  if (url) text.link = { url };\n  return [{ type: 'text', text }];\n}\n\n/**\n * Notion pages for the review-queue database. The database parent is\n * deliberately NOT included: the sender adds it from NOTION_DATABASE_ID at\n * send time, so the ID never appears in workflow item data or reports.\n */\nfunction buildNotionPages(result, meta) {\n  const m = meta || {};\n  return result.clusters.map((c) => {\n    const primary = c.members.find((x) => x.isSuggestedPrimary) || c.members[0];\n    const domains = [];\n    for (const mem of c.members) {\n      const d = mem.rootDomain || mem.domain;\n      if (d && domains.indexOf(d) === -1) domains.push(d);\n    }\n    const children = [\n      { object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Records') } },\n    ];\n    for (const mem of c.members.slice(0, 40)) {\n      const label = (mem.name || '(no name)') + ' — ID ' + mem.id +\n        (mem.domain || mem.website ? ' — ' + (mem.domain || mem.website) : '') +\n        ' — deals: ' + (mem.numAssociatedDeals || 0) + (mem.isSuggestedPrimary ? ' — suggested primary' : '');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(label, hubspotRecordUrl(m, mem.id)) } });\n    }\n    children.push({ object: 'block', type: 'heading_3', heading_3: { rich_text: richText('Matched pairs') } });\n    for (const p of c.pairs.slice(0, 50)) {\n      const detail = p.a + ' ↔ ' + p.b + ': score ' + p.score +\n        (p.nameScore !== null ? ' · name JW ' + p.nameJaroWinkler + ' / Lev ' + p.nameLevenshtein : '') +\n        (p.domainScore !== null ? ' · domain ' + p.domainScore : '') +\n        ' · ' + p.reasons.join(', ');\n      children.push({ object: 'block', type: 'bulleted_list_item', bulleted_list_item: { rich_text: richText(detail) } });\n    }\n    children.push({\n      object: 'block', type: 'paragraph',\n      paragraph: { rich_text: richText('Generated by n8n-hubspot-duplicate-company-domain-fuzzy-matcher. Review before merging in HubSpot; merges cannot be undone.') },\n    });\n\n    return {\n      clusterId: c.clusterId,\n      query: { filter: { property: 'Cluster ID', rich_text: { equals: c.clusterId } }, page_size: 1 },\n      page: {\n        properties: {\n          Name: { title: richText(clusterTitle(c)) },\n          'Cluster ID': { rich_text: richText(c.clusterId) },\n          Status: { select: { name: NOTION_STATUS_DEFAULT } },\n          'Max Score': { number: c.maxScore },\n          'Record Count': { number: c.size },\n          'Suggested Primary': { rich_text: richText((primary.name || '(no name)') + ' (ID ' + primary.id + ')', hubspotRecordUrl(m, primary.id)) },\n          'HubSpot IDs': { rich_text: richText(c.members.map((x) => x.id).join(', ')) },\n          Domains: { rich_text: richText(domains.join(', ')) },\n          Reasons: { multi_select: c.reasons.map((r) => ({ name: r })) },\n          'Detected At': { date: { start: m.runAt || new Date().toISOString() } },\n        },\n        children,\n      },\n    };\n  });\n}\n\n/** Everything a dry run would have sent, without sending anything. */\nfunction buildDryRunPreview(result, meta) {\n  return {\n    dryRun: true,\n    note: 'DRY_RUN is on: nothing was sent to Slack or Notion. Set DRY_RUN=false to deliver.',\n    meta,\n    summary: result.summary,\n    slackPayload: buildSlackPayload(result, meta),\n    notionPages: buildNotionPages(result, meta),\n    csv: toCsv(result),\n  };\n}\n\n// ===== n8n glue =====\nconst { result, meta } = $('Normalize & Fuzzy Match').first().json;\nreturn buildNotionPages(result, meta).map((page) => ({ json: page }));\n"
+      },
+      "id": "e76e0738-ae1e-42c2-a6e8-f9ae3264a188",
+      "name": "Build Notion Pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        400
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.notion.com/v1/databases/{{ $env.NOTION_DATABASE_ID }}/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.NOTION_API_KEY }}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.query) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 400
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "7f18cb2a-8d46-4a54-a998-d0505d3aac1a",
+      "name": "Notion: Find Existing Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        400
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0d7ee3de-13a5-4978-a9a1-3e54f6e9996e",
+              "leftValue": "={{ ($json.results || []).length }}",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1d48c34c-277a-4052-a24d-c72e4c558f9c",
+      "name": "New Cluster?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.NOTION_API_KEY }}"
+            },
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({ parent: { database_id: $env.NOTION_DATABASE_ID } }, $('Build Notion Pages').item.json.page)) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 400
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "d55583ea-894e-4f4c-ad82-6b181916129a",
+      "name": "Notion: Create Review Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        320
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {},
+      "id": "82c8d1a4-130b-482e-a161-4bca9a7e5454",
+      "name": "Already Queued",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== inlined from src/safety.js (generated — edit the source file, not this node) =====\n/**\n * safety.js — configuration resolution, sandbox gate and secret masking.\n *\n * PURE MODULE: no require(), no I/O. scripts/build-workflow.js inlines this\n * file verbatim into the n8n Code nodes (\"Config & Safety Gate\",\n * \"Sandbox Verification\", \"Masked Error Logger\") so the CLI and the workflow\n * enforce exactly the same rules.\n */\n\nconst ALLOWED_ACCOUNT_TYPES = ['SANDBOX', 'DEVELOPER_TEST'];\nconst NOTIFY_TARGET_VALUES = ['slack', 'notion', 'none'];\nconst SECRET_ENV_KEYS = ['HUBSPOT_ACCESS_TOKEN', 'SLACK_WEBHOOK_URL', 'NOTION_API_KEY', 'NOTION_DATABASE_ID'];\nconst CONFIG_ENV_KEYS = SECRET_ENV_KEYS.concat([\n  'DRY_RUN',\n  'SANDBOX_MODE',\n  'SIMILARITY_THRESHOLD',\n  'NOTIFY_TARGETS',\n  'MAX_COMPANIES',\n  'MAX_BLOCK_SIZE',\n  'HUBSPOT_API_BASE',\n]);\n\n/**\n * Parse a boolean-ish env value. Anything that is not a recognised value\n * falls back to the default, so a typo such as DRY_RUN=flase stays SAFE.\n */\nfunction parseBool(value, defaultValue) {\n  if (value === undefined || value === null) return defaultValue;\n  const v = String(value).trim().toLowerCase();\n  if (v === '') return defaultValue;\n  if (['true', '1', 'yes', 'on'].includes(v)) return true;\n  if (['false', '0', 'no', 'off'].includes(v)) return false;\n  return defaultValue;\n}\n\nfunction parseNumber(value, defaultValue) {\n  if (value === undefined || value === null || String(value).trim() === '') return defaultValue;\n  const n = Number(String(value).trim());\n  return Number.isFinite(n) ? n : NaN;\n}\n\n/** Placeholder values copied from .env.example are treated as \"not set\". */\nfunction cleanSecret(value) {\n  if (value === undefined || value === null) return '';\n  const s = String(value).trim();\n  if (/^YOUR_[A-Z0-9_]+$/.test(s)) return '';\n  return s;\n}\n\n/**\n * Resolve the full runtime configuration from an env-like object.\n * Returns { settings, secrets, errors }. `settings` never contains secret\n * values, so it is safe to log or pass between n8n nodes.\n */\nfunction resolveConfig(env, options) {\n  const opts = options || {};\n  const e = env || {};\n  const secrets = {\n    hubspotToken: cleanSecret(e.HUBSPOT_ACCESS_TOKEN),\n    slackWebhookUrl: cleanSecret(e.SLACK_WEBHOOK_URL),\n    notionApiKey: cleanSecret(e.NOTION_API_KEY),\n    notionDatabaseId: cleanSecret(e.NOTION_DATABASE_ID),\n  };\n\n  const rawTargets = e.NOTIFY_TARGETS === undefined || e.NOTIFY_TARGETS === null || String(e.NOTIFY_TARGETS).trim() === ''\n    ? 'slack'\n    : String(e.NOTIFY_TARGETS);\n  const targets = rawTargets.toLowerCase().split(/[\\s,]+/).filter(Boolean);\n\n  const settings = {\n    dryRun: parseBool(e.DRY_RUN, true),\n    sandboxMode: parseBool(e.SANDBOX_MODE, true),\n    similarityThreshold: parseNumber(e.SIMILARITY_THRESHOLD, 0.85),\n    notifySlack: targets.includes('slack'),\n    notifyNotion: targets.includes('notion'),\n    notifyTargets: targets,\n    maxCompanies: parseNumber(e.MAX_COMPANIES, 50000),\n    maxBlockSize: parseNumber(e.MAX_BLOCK_SIZE, 2000),\n    hubspotApiBase: String(e.HUBSPOT_API_BASE || 'https://api.hubapi.com').trim().replace(/\\/+$/, ''),\n    secretsPresent: {\n      hubspotToken: secrets.hubspotToken !== '',\n      slackWebhookUrl: secrets.slackWebhookUrl !== '',\n      notionApiKey: secrets.notionApiKey !== '',\n      notionDatabaseId: secrets.notionDatabaseId !== '',\n    },\n  };\n\n  if (opts.forceDryRun) settings.dryRun = true;\n  if (opts.thresholdOverride !== undefined && opts.thresholdOverride !== null) {\n    settings.similarityThreshold = parseNumber(opts.thresholdOverride, NaN);\n  }\n  if (opts.targetsOverride) {\n    const t = String(opts.targetsOverride).toLowerCase().split(/[\\s,]+/).filter(Boolean);\n    settings.notifyTargets = t;\n    settings.notifySlack = t.includes('slack');\n    settings.notifyNotion = t.includes('notion');\n  }\n\n  const errors = [];\n  const t = settings.similarityThreshold;\n  if (!(t > 0 && t <= 1)) errors.push('SIMILARITY_THRESHOLD must be a number greater than 0 and at most 1');\n  const unknown = settings.notifyTargets.filter((x) => !NOTIFY_TARGET_VALUES.includes(x));\n  if (unknown.length) errors.push('NOTIFY_TARGETS contains unknown value(s): ' + unknown.join(', ') + ' (allowed: slack, notion, none)');\n  if (!(Number.isInteger(settings.maxCompanies) && settings.maxCompanies > 0)) errors.push('MAX_COMPANIES must be a positive integer');\n  if (!(Number.isInteger(settings.maxBlockSize) && settings.maxBlockSize >= 2)) errors.push('MAX_BLOCK_SIZE must be an integer of at least 2');\n  if (!/^https:\\/\\//i.test(settings.hubspotApiBase)) errors.push('HUBSPOT_API_BASE must use https://');\n\n  if (!opts.offline && !secrets.hubspotToken) {\n    errors.push('HUBSPOT_ACCESS_TOKEN is not set (placeholder values count as unset)');\n  }\n  if (!settings.dryRun && settings.notifySlack) {\n    if (!secrets.slackWebhookUrl) errors.push('SLACK_WEBHOOK_URL is required when DRY_RUN=false and NOTIFY_TARGETS includes slack');\n    else if (!/^https:\\/\\//i.test(secrets.slackWebhookUrl)) errors.push('SLACK_WEBHOOK_URL must use https://');\n  }\n  if (!settings.dryRun && settings.notifyNotion) {\n    if (!secrets.notionApiKey) errors.push('NOTION_API_KEY is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n    if (!secrets.notionDatabaseId) errors.push('NOTION_DATABASE_ID is required when DRY_RUN=false and NOTIFY_TARGETS includes notion');\n  }\n\n  return { settings, secrets, errors };\n}\n\n/**\n * Sandbox gate. When sandboxMode is on, the connected HubSpot portal must\n * report accountType SANDBOX or DEVELOPER_TEST (GET /account-info/v3/details).\n * Throws otherwise, which stops both the CLI and the n8n workflow.\n */\nfunction assertSandbox(accountInfo, sandboxMode) {\n  const accountType = String((accountInfo && accountInfo.accountType) || '').toUpperCase();\n  if (!sandboxMode) {\n    return { ok: true, enforced: false, accountType: accountType || 'UNKNOWN' };\n  }\n  if (ALLOWED_ACCOUNT_TYPES.includes(accountType)) {\n    return { ok: true, enforced: true, accountType };\n  }\n  throw new Error(\n    'Sandbox gate blocked this run: SANDBOX_MODE=true but the connected HubSpot portal reports accountType \"' +\n      (accountType || 'UNKNOWN') +\n      '\". Allowed: ' + ALLOWED_ACCOUNT_TYPES.join(', ') +\n      '. Point the token at a sandbox or developer test account, or set SANDBOX_MODE=false deliberately.'\n  );\n}\n\nconst SECRET_PATTERNS = [\n  [/Bearer\\s+[A-Za-z0-9._~+\\/=-]+/gi, 'Bearer ***'],\n  [/\\bpat-[a-z0-9]{2,4}-[A-Za-z0-9-]{8,}/gi, 'pat-***'],\n  [/https:\\/\\/hooks\\.slack\\.com\\/[^\\s\"'<>]+/gi, 'https://hooks.slack.com/***'],\n  [/\\b(?:secret|ntn)_[A-Za-z0-9]{16,}/g, '***notion-key***'],\n  [/\\b[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}\\b/gi, '***id***'],\n  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/g, '***@***'],\n];\n\n/** Mask known secret values and secret-shaped strings (tokens, webhooks, emails). */\nfunction maskSecrets(text, secretValues) {\n  let s = text === undefined || text === null ? '' : String(text);\n  const values = (secretValues || [])\n    .filter((v) => typeof v === 'string' && v.length >= 6)\n    .sort((a, b) => b.length - a.length);\n  for (const v of values) s = s.split(v).join('***');\n  for (const [re, replacement] of SECRET_PATTERNS) s = s.replace(re, replacement);\n  return s;\n}\n\n/** Turn any error-like value into a small, masked, log-safe object. */\nfunction maskError(errLike, secretValues) {\n  let message;\n  let status = null;\n  let name = 'Error';\n  if (errLike === undefined || errLike === null) message = 'Unknown error';\n  else if (typeof errLike === 'string') message = errLike;\n  else {\n    name = errLike.name || name;\n    status = errLike.httpCode || errLike.status || errLike.statusCode || null;\n    message = errLike.message || errLike.description || '';\n    if (!message) {\n      try { message = JSON.stringify(errLike); } catch (_) { message = String(errLike); }\n    }\n  }\n  const masked = maskSecrets(message, secretValues);\n  return {\n    name: String(name),\n    status: status === null ? null : String(status),\n    message: masked.length > 1000 ? masked.slice(0, 999) + '…' : masked,\n  };\n}\n\n// ===== n8n glue =====\nconst secretValues = [];\nfor (const key of SECRET_ENV_KEYS) {\n  try { const v = $env[key]; if (v) secretValues.push(String(v)); } catch (e) { /* env access blocked */ }\n}\nlet source = 'unknown node';\ntry { source = $prevNode.name; } catch (e) { /* not available */ }\nreturn $input.all().map((item) => {\n  const j = item.json || {};\n  const masked = maskError(j.error !== undefined ? j.error : j, secretValues);\n  return { json: Object.assign({ level: 'error', node: source, at: new Date().toISOString() }, masked) };\n});\n"
+      },
+      "id": "059fedde-aeae-4618-a8ca-a16ce8d30aae",
+      "name": "Masked Error Logger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ 'Duplicate audit failed at ' + $json.node + ': ' + $json.message }}"
+      },
+      "id": "83f6b9ab-882d-4ac9-a083-1e3dbcbd5b3b",
+      "name": "Stop: Audit Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        720
+      ]
+    }
+  ],
+  "connections": {
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config & Safety Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config & Safety Gate": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Verify Portal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Verify Portal": {
+      "main": [
+        [
+          {
+            "node": "Sandbox Verification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sandbox Verification": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: Fetch Companies",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: Fetch Companies": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Fuzzy Match",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Fuzzy Match": {
+      "main": [
+        [
+          {
+            "node": "Any Clusters?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Clusters?": {
+      "main": [
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Duplicates Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Dry Run Preview",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Notifications": {
+      "main": [
+        [
+          {
+            "node": "Build Slack Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Notion Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack Payload": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Review Queue": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notion Pages": {
+      "main": [
+        [
+          {
+            "node": "Notion: Find Existing Entry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion: Find Existing Entry": {
+      "main": [
+        [
+          {
+            "node": "New Cluster?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Cluster?": {
+      "main": [
+        [
+          {
+            "node": "Notion: Create Review Entry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Already Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notion: Create Review Entry": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Masked Error Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Masked Error Logger": {
+      "main": [
+        [
+          {
+            "node": "Stop: Audit Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": []
+}
